@@ -94,6 +94,8 @@ struct GlobeView: NSViewRepresentable {
     var focus: MapFocus?
     /// Incremented to frame the data closely.
     var zoomRequest = 0
+    /// Area covered by floating panels, kept clear of the map's own controls.
+    var insets = NSEdgeInsets()
     var onSelect: (String?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -120,6 +122,11 @@ struct GlobeView: NSViewRepresentable {
         if coordinator.style != style {
             coordinator.style = style
             map.preferredConfiguration = style.configuration
+        }
+        let current = map.additionalSafeAreaInsets
+        if current.left != insets.left || current.bottom != insets.bottom
+            || current.top != insets.top || current.right != insets.right {
+            map.additionalSafeAreaInsets = insets
         }
         coordinator.syncFocus(focus, zoomRequest: zoomRequest, on: map)
         coordinator.syncTargets(entities, on: map)

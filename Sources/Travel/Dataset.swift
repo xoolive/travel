@@ -4,7 +4,7 @@ import Foundation
 @MainActor
 final class Dataset {
     static let maxTrackPoints = 3000
-    static let maxPlotPoints = 1200
+    static let maxPlotPoints = 600
     /// Longer position gaps are drawn dashed.
     static let dashedGap = 300.0
     /// A target is kept on the map across position gaps up to this long.
@@ -47,6 +47,10 @@ final class Dataset {
 
     func kind(of id: String) -> Kind? {
         index[id].map { series[$0].kind }
+    }
+
+    func name(of id: String) -> String? {
+        index[id].flatMap { series[$0].name }
     }
 
     /// Appends new data; within a series it must be newer than what is stored.

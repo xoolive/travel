@@ -12,7 +12,7 @@ struct SourceItem: Identifiable, Hashable {
         id = url.path
         self.url = url
         var stem = url.lastPathComponent
-        for suffix in [".zst", ".jsonl", ".json"] where stem.lowercased().hasSuffix(suffix) {
+        for suffix in [".zst", ".7z", ".jsonl", ".json"] where stem.lowercased().hasSuffix(suffix) {
             stem.removeLast(suffix.count)
         }
         // Names such as 20260903_AA87049241_LFBO_EHAM or 20260617_rotterdam_kinderdijk.
@@ -115,13 +115,19 @@ final class AppState {
     func add(_ urls: [URL]) {
         let urls = urls.filter(RecordingLoader.isSupported).sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !urls.isEmpty else {
-            loadError = "Drop jet1090 or ship162 recordings (.jsonl or .jsonl.zst)."
+            loadError = "Drop jet1090 or ship162 recordings (.jsonl, .jsonl.zst or .jsonl.7z)."
             return
         }
         for url in urls where !sources.contains(where: { $0.id == url.path }) {
             sources.append(SourceItem(url: url))
         }
-        selection = Set(urls.map(\.path))
+        let wanted = Set(urls.map(\.path))
+        if selection == wanted {
+            // Opening the displayed recording again reloads it.
+            activate()
+        } else {
+            selection = wanted
+        }
     }
 
     func remove(_ item: SourceItem) {
@@ -284,13 +290,19 @@ final class AppState {
         loadProgress = 0
         loading = Task {
             do {
-                let series = try await Task.detached(priority: .userInitiated) {
+                let worker = Task.detached(priority: .userInitiated) {
                     try RecordingLoader.load(urls) { fraction in
                         Task { @MainActor in
                             if self.loadProgress != nil { self.loadProgress = fraction }
                         }
                     }
-                }.value
+                }
+                // Cancelling the load stops the worker too.
+                let series = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: {
+                    worker.cancel()
+                }
                 guard !Task.isCancelled else { return }
                 let dataset = Dataset(name: name, isLive: false)
                 dataset.merge(series)

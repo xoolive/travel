@@ -9,6 +9,10 @@ enum PlotGroup: String, CaseIterable, Identifiable {
     case directions = "Directions"
 
     var id: String { rawValue }
+
+    static func available(for kind: Kind) -> [PlotGroup] {
+        kind == .ship ? [.speed, .directions] : allCases
+    }
 }
 
 private struct PlotLine: Identifiable {
@@ -36,38 +40,29 @@ private struct PlotContent {
 
 private let axisTime = Date.FormatStyle(timeZone: .gmt).hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)
 
-/// Time series of the selected target. Click or drag to move the clock.
-struct PlotPanel: View {
+/// All plots of one target, stacked. Click or drag in a plot to move the clock.
+struct PlotStack: View {
     @Bindable var state: AppState
-    @State private var group: PlotGroup = .altitude
+    let id: String
+    let kind: Kind
 
     var body: some View {
-        // Reading `revision` redraws the plot when live data arrives.
+        // Reading `revision` redraws the plots when live data arrives.
         let _ = state.revision
-        let kind = state.selectedID.flatMap { state.dataset?.kind(of: $0) } ?? .aircraft
-        let groups: [PlotGroup] = kind == .ship ? [.speed, .directions] : PlotGroup.allCases
-        let active = groups.contains(group) ? group : groups[0]
-        let content = build(active, kind)
-
-        VStack(alignment: .leading, spacing: 6) {
-            Picker("Plot", selection: $group) {
-                ForEach(groups) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-
-            if content.lines.isEmpty {
-                Text("No data for this target")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                chart(content)
+        VStack(alignment: .leading, spacing: 18) {
+            ForEach(PlotGroup.available(for: kind)) { group in
+                let content = build(group)
+                if !content.lines.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(group.rawValue.uppercased())
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        chart(content)
+                            .frame(height: 130)
+                    }
+                }
             }
         }
-        .padding(10)
-        .frame(minHeight: 180, idealHeight: 240)
-        .background(.background)
     }
 
     private func chart(_ content: PlotContent) -> some View {
@@ -77,7 +72,7 @@ struct PlotPanel: View {
                     let x = Date(timeIntervalSince1970: line.points[i].t)
                     if line.asPoints {
                         PointMark(x: .value("Time", x), y: .value("Value", line.points[i].v))
-                            .symbolSize(10)
+                            .symbolSize(8)
                             .foregroundStyle(by: .value("Series", line.id))
                     } else {
                         LineMark(x: .value("Time", x), y: .value("Value", line.points[i].v), series: .value("Run", "\(line.id) \(line.runs[i])"))
@@ -90,13 +85,13 @@ struct PlotPanel: View {
         .chartYScale(domain: content.domain)
         .chartXScale(domain: Date(timeIntervalSince1970: state.rangeStart)...Date(timeIntervalSince1970: max(state.rangeEnd, state.rangeStart + 1)))
         .chartXAxis {
-            AxisMarks { _ in
+            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                 AxisGridLine()
                 AxisValueLabel(format: state.rangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
             }
         }
         .chartYAxis {
-            AxisMarks(position: .leading)
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 4))
             AxisMarks(position: .trailing, values: content.secondary?.ticks ?? []) { value in
                 AxisValueLabel {
                     if let v = value.as(Double.self), let secondary = content.secondary {
@@ -110,8 +105,8 @@ struct PlotPanel: View {
         }
     }
 
-    private func build(_ group: PlotGroup, _ kind: Kind) -> PlotContent {
-        guard let dataset = state.dataset, let id = state.selectedID else { return PlotContent() }
+    private func build(_ group: PlotGroup) -> PlotContent {
+        guard let dataset = state.dataset else { return PlotContent() }
         func line(_ label: String, _ channel: Channel, _ color: Color, points: Bool = false, map: ((Double) -> Double)? = nil) -> PlotLine? {
             var samples = dataset.samples(for: id, channel)
             guard !samples.isEmpty else { return nil }
@@ -127,8 +122,8 @@ struct PlotPanel: View {
         switch group {
         case .altitude:
             content.lines = [
-                line("Barometric altitude", .altitude, .blue),
-                line("Selected altitude", .selectedAltitude, .orange),
+                line("Barometric", .altitude, .blue),
+                line("Selected", .selectedAltitude, .orange),
             ].compactMap { $0 }
         case .speed:
             if kind == .ship {
@@ -140,7 +135,9 @@ struct PlotPanel: View {
                     line("TAS", .tas, .green),
                     line("Mach", .mach, .yellow) { $0 * 600 },
                 ].compactMap { $0 }
-                content.secondary = SecondaryAxis(ticks: [0, 150, 300, 450, 600]) { String(format: "M %.2f", $0 / 600) }
+                if content.lines.contains(where: { $0.id == "Mach" }) {
+                    content.secondary = SecondaryAxis(ticks: [0, 300, 600]) { String(format: "M%.1f", $0 / 600) }
+                }
             }
         case .verticalRate:
             content.lines = [
@@ -151,12 +148,12 @@ struct PlotPanel: View {
         case .directions:
             content.lines = [
                 line(kind == .ship ? "Course" : "Track", .track, .blue, points: true),
-                line(kind == .ship ? "Heading" : "Magnetic heading", .heading, .orange, points: true),
+                line("Heading", .heading, .orange, points: true),
                 // Roll -45...45 degrees drawn on the 0...360 scale.
-                line("Roll angle", .roll, .green) { ($0 + 45) * 4 },
+                line("Roll", .roll, .green) { ($0 + 45) * 4 },
             ].compactMap { $0 }
-            if kind == .aircraft {
-                content.secondary = SecondaryAxis(ticks: [0, 90, 180, 270, 360]) { String(format: "%.0f°", $0 / 4 - 45) }
+            if content.lines.contains(where: { $0.id == "Roll" }) {
+                content.secondary = SecondaryAxis(ticks: [0, 180, 360]) { String(format: "%.0f°", $0 / 4 - 45) }
             }
         }
 

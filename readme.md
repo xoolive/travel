@@ -4,8 +4,9 @@ A macOS app that shows aircraft and ships on a globe, from
 [jet1090](https://github.com/xoolive/jet1090) and
 [ship162](https://github.com/xoolive/ship162) decoded messages.
 
-It replays recordings and follows live feeds, with a map, a state table and
-time series plots for the selected aircraft or ship.
+It replays recordings and follows live feeds. The map fills the window; a
+floating panel lists the sources, or shows the selected aircraft or ship with
+its plots, and a state table can be laid over the map.
 
 ## Run
 
@@ -27,8 +28,8 @@ and opens it. Options are passed to the app:
 
 ## Sources
 
-- **Recordings**: drop `.jsonl` or `.jsonl.zst` files written by `jet1090` or
-  `ship162` on the window. Several recordings selected together in the sidebar
+- **Recordings**: drop `.jsonl`, `.jsonl.zst` or `.jsonl.7z` files written by
+  `jet1090` or `ship162` on the window. Several recordings selected together in the sidebar
   are merged. A timeline replays them at 1× to 1000×.
 - **Live**: Redis pub/sub channels carrying the same JSON messages. Sources
   are added, edited, started and stopped from the sidebar; the default is
@@ -38,10 +39,11 @@ and opens it. Options are passed to the app:
 
 - **Map**: a MapKit globe. Selecting a target draws its trajectory; reception
   gaps longer than five minutes are bridged with a dashed line.
+- **Detail**: selecting a target turns the side panel into its current state
+  and plots of altitude, speed, vertical rate and directions. Click or drag in
+  a plot to move the clock.
 - **Table**: sortable state table with the columns of the `jet1090` terminal
   interface, and a second table for ships.
-- **Plots**: altitude, speed, vertical rate and directions for the selected
-  target. Click or drag in a plot to move the clock.
 
 ## Layout
 

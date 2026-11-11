@@ -12,7 +12,15 @@ private let clockFormatter: DateFormatter = {
 
 /// Sortable state table, with the columns of the jet1090 terminal interface.
 struct EntityTable: View {
+    /// Rows shown without scrolling, at most.
+    private static let maxVisibleRows = 20
+    private static let rowHeight: CGFloat = 24
+    /// Filter bar plus column headers.
+    private static let chrome: CGFloat = 76
+
     @Bindable var state: AppState
+    /// The table never grows beyond this.
+    var maxHeight: CGFloat = .infinity
     @State private var kind: Kind = .aircraft
     @State private var order = [KeyPathComparator(\Entity.nameKey)]
     @State private var search = ""
@@ -62,6 +70,11 @@ struct EntityTable: View {
             }
         }
         .font(.callout.monospacedDigit())
+        .scrollContentBackground(.hidden)
+        .frame(height: min(
+            maxHeight,
+            Self.chrome + CGFloat(min(Self.maxVisibleRows, max(3, rows.count))) * Self.rowHeight
+        ))
         .onChange(of: state.dataset?.id, initial: true) {
             guard let dataset = state.dataset, !dataset.isLive else { return }
             kind = dataset.count(of: .aircraft) == 0 ? .ship : .aircraft
