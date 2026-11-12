@@ -12,8 +12,8 @@ private let clockFormatter: DateFormatter = {
 
 /// Sortable state table, with the columns of the jet1090 terminal interface.
 struct EntityTable: View {
-    /// Rows shown without scrolling, at most.
-    private static let maxVisibleRows = 20
+    /// Rows shown without scrolling.
+    private static let visibleRows = 20
     private static let rowHeight: CGFloat = 24
     /// Filter bar plus column headers.
     private static let chrome: CGFloat = 76
@@ -22,7 +22,8 @@ struct EntityTable: View {
     /// The table never grows beyond this.
     var maxHeight: CGFloat = .infinity
     @State private var kind: Kind = .aircraft
-    @State private var order = [KeyPathComparator(\Entity.nameKey)]
+    /// Busiest targets first.
+    @State private var order = [KeyPathComparator(\Entity.count, order: .reverse)]
     @State private var search = ""
 
     private var rows: [Entity] {
@@ -71,10 +72,8 @@ struct EntityTable: View {
         }
         .font(.callout.monospacedDigit())
         .scrollContentBackground(.hidden)
-        .frame(height: min(
-            maxHeight,
-            Self.chrome + CGFloat(min(Self.maxVisibleRows, max(3, rows.count))) * Self.rowHeight
-        ))
+        // Always the same size, whatever the number of rows.
+        .frame(height: min(maxHeight, Self.chrome + CGFloat(Self.visibleRows) * Self.rowHeight))
         .onChange(of: state.dataset?.id, initial: true) {
             guard let dataset = state.dataset, !dataset.isLive else { return }
             kind = dataset.count(of: .aircraft) == 0 ? .ship : .aircraft
@@ -92,7 +91,13 @@ struct EntityTable: View {
     private var aircraftIdentity: some TableColumnContent<Entity, KeyPathComparator<Entity>> {
         TableColumn("icao24", value: \Entity.id) { Text($0.id) }
             .width(min: 40, ideal: 64)
+        TableColumn("", value: \Entity.flagKey) { Text($0.info.flag ?? "") }
+            .width(22)
+        TableColumn("tail", value: \Entity.registrationKey) { Text($0.registrationKey) }
+            .width(min: 40, ideal: 70)
         TableColumn("callsign", value: \Entity.nameKey) { Text($0.nameKey) }
+        TableColumn("type", value: \Entity.typecodeKey) { Text($0.typecodeKey) }
+            .width(min: 40, ideal: 48)
         TableColumn("sqwk", value: \Entity.squawkKey) { Text($0.squawkKey) }
             .width(min: 40, ideal: 48)
         TableColumn("lat", value: \Entity.latitudeKey) { Text($0.latitude.map { String(format: "%.3f", $0) } ?? "") }

@@ -35,6 +35,14 @@ and opens it. Options are passed to the app:
   are added, edited, started and stopped from the sidebar; the default is
   `127.0.0.1:6379` with channels `jet1090` and `ship162`.
 
+## Aircraft database
+
+Registrations and type codes come from the BaseStation database cached by
+`jet1090` (`~/Library/Caches/jet1090/basestation.sqb`). Another database can
+be chosen in File > Aircraft Database: a `.csv` or `.csv.gz` table with
+`icao24`, `registration` and `typecode` columns, or a BaseStation `.sqb` file.
+The type code selects the aircraft icon, from the tangram icon set.
+
 ## Views
 
 - **Map**: a MapKit globe. Selecting a target draws its trajectory; reception

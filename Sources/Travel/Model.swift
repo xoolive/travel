@@ -51,6 +51,12 @@ struct TrackSegment: Sendable, Equatable {
 
 /// Slow-changing text attributes; the latest value wins.
 struct Info: Sendable, Equatable {
+    /// From the aircraft database.
+    var registration: String?
+    /// ICAO type designator such as `B789`, from the aircraft database.
+    var typecode: String?
+    /// Seen in DF 18 messages, which mostly come from airport surface vehicles.
+    var isVehicle = false
     var squawk: String?
     var radioCallsign: String?
     var shipType: String?
@@ -60,6 +66,9 @@ struct Info: Sendable, Equatable {
     var country: String?
 
     mutating func merge(_ other: Info) {
+        registration = other.registration ?? registration
+        typecode = other.typecode ?? typecode
+        isVehicle = isVehicle || other.isVehicle
         squawk = other.squawk ?? squawk
         radioCallsign = other.radioCallsign ?? radioCallsign
         shipType = other.shipType ?? shipType
@@ -133,6 +142,8 @@ extension Entity {
 
     var nameKey: String { name ?? "" }
     var squawkKey: String { info.squawk ?? "" }
+    var registrationKey: String { info.registration ?? "" }
+    var typecodeKey: String { info.typecode ?? "" }
     var latitudeKey: Double { latitude ?? -.infinity }
     var longitudeKey: Double { longitude ?? -.infinity }
     var flagKey: String { info.country ?? "" }

@@ -108,13 +108,12 @@ struct PlotStack: View {
     private func build(_ group: PlotGroup) -> PlotContent {
         guard let dataset = state.dataset else { return PlotContent() }
         func line(_ label: String, _ channel: Channel, _ color: Color, points: Bool = false, map: ((Double) -> Double)? = nil) -> PlotLine? {
-            var samples = dataset.samples(for: id, channel)
-            guard !samples.isEmpty else { return nil }
-            if let map { samples = samples.map { Sample(t: $0.t, v: map($0.v)) } }
-            var runs = [Int](repeating: 0, count: samples.count)
-            for i in samples.indices.dropFirst() {
-                runs[i] = runs[i - 1] + (samples[i].t - samples[i - 1].t > kind.timeout ? 1 : 0)
+            let thinned = dataset.samples(for: id, channel, gap: kind.timeout)
+            guard !thinned.isEmpty else { return nil }
+            let samples = thinned.map { item in
+                map.map { Sample(t: item.sample.t, v: $0(item.sample.v)) } ?? item.sample
             }
+            let runs = thinned.map(\.run)
             return PlotLine(id: label, color: color, points: samples, asPoints: points, runs: runs)
         }
 

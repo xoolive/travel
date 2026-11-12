@@ -106,6 +106,7 @@ final class Builder {
             ?? (message["bds20"] as? NSDictionary).flatMap { text($0, "callsign") }
         if let callsign, !callsign.contains("#") { series[i].name = callsign }
         if let squawk = text(message, "squawk") { series[i].info.squawk = squawk }
+        if message["df"] as? String == "18" { series[i].info.isVehicle = true }
 
         if let latitude = number(message, "latitude"), let longitude = number(message, "longitude") {
             series[i].positions.append(Position(t: t, latitude: latitude, longitude: longitude))

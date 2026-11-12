@@ -38,6 +38,7 @@ struct SourceItem: Identifiable, Hashable {
 final class AppState {
     private static let livePrefix = "live:"
     private static let liveSourcesKey = "liveSources"
+    private static let databaseKey = "aircraftDatabase"
 
     enum LiveStatus: Equatable {
         case off
@@ -88,12 +89,21 @@ final class AppState {
 
     /// Everything received from all live sources; it keeps filling while a
     /// recording is displayed.
-    @ObservationIgnored private var liveDataset = Dataset(name: "Live", isLive: true)
+    @ObservationIgnored private var liveDataset: Dataset
+    /// Registrations and type codes of aircraft.
+    private(set) var database: AircraftDatabase
     @ObservationIgnored private var feeds: [UUID: LiveFeed] = [:]
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var loading: Task<Void, Never>?
 
     init() {
+        // A chosen CSV table is read in the background; jet1090's meanwhile.
+        let database = AircraftDatabase(source: .jet1090)
+        self.database = database
+        liveDataset = Dataset(name: "Live", isLive: true, database: database)
+        if let path = UserDefaults.standard.string(forKey: Self.databaseKey) {
+            useDatabase(.file(URL(fileURLWithPath: path)))
+        }
         if let data = UserDefaults.standard.data(forKey: Self.liveSourcesKey),
            let saved = try? JSONDecoder().decode([LiveSource].self, from: data) {
             liveSources = saved
@@ -212,10 +222,32 @@ final class AppState {
     /// Forgets everything received live so far; sources keep running.
     func clearLive() {
         let wasDisplayed = isLive
-        liveDataset = Dataset(name: "Live", isLive: true)
+        liveDataset = Dataset(name: "Live", isLive: true, database: database)
         if wasDisplayed {
             selectedID = nil
             show(liveDataset)
+        }
+    }
+
+    // MARK: Aircraft database
+
+    /// Switches to another database and looks all aircraft up again.
+    func useDatabase(_ source: AircraftDatabase.Source) {
+        switch source {
+        case .jet1090: UserDefaults.standard.removeObject(forKey: Self.databaseKey)
+        case let .file(url): UserDefaults.standard.set(url.path, forKey: Self.databaseKey)
+        }
+        Task {
+            var table: [String: AircraftDatabase.Record]?
+            if case let .file(url) = source, AircraftDatabase.isTable(url) {
+                table = await Task.detached(priority: .userInitiated) { AircraftDatabase.readTable(url) }.value
+            }
+            let database = AircraftDatabase(source: source, table: table)
+            self.database = database
+            liveDataset.use(database)
+            if let dataset, dataset !== liveDataset { dataset.use(database) }
+            revision = dataset?.revision ?? 0
+            refresh()
         }
     }
 
@@ -304,7 +336,7 @@ final class AppState {
                     worker.cancel()
                 }
                 guard !Task.isCancelled else { return }
-                let dataset = Dataset(name: name, isLive: false)
+                let dataset = Dataset(name: name, isLive: false, database: database)
                 dataset.merge(series)
                 show(dataset)
             } catch is CancellationError {

@@ -3,8 +3,19 @@ import Foundation
 /// All series of the active source (a recording or a live feed), queried by time.
 @MainActor
 final class Dataset {
-    static let maxTrackPoints = 3000
-    static let maxPlotPoints = 600
+    /// Track points closer than this to the simplified line are dropped, metres.
+    static let trackTolerance = 3.0
+    /// Below this speed (100 kt, in m/s) the track is kept nearly whole.
+    static let slowSpeed = 51.4
+    /// Smallest movement kept at low speed, metres.
+    static let slowStep = 1.5
+    /// Received positions further apart than this are joined by a curve, seconds.
+    static let sparseInterval = 6.0
+    /// Spacing of the points drawn along such a curve, seconds.
+    static let curveStep = 3.0
+    /// The same for plots, as a fraction of the range of values.
+    static let plotTolerance = 0.003
+    static let maxPlotPoints = 3000
     /// Longer position gaps are drawn dashed.
     static let dashedGap = 300.0
     /// A target is kept on the map across position gaps up to this long.
@@ -23,11 +34,24 @@ final class Dataset {
     private(set) var revision = 0
 
     private var index: [String: Int] = [:]
+    private var trackCache: (id: String, revision: Int, runs: [[Position]])?
+    private var plotCache: (revision: Int, entries: [String: [(sample: Sample, run: Int)]]) = (0, [:])
     private var south = 90.0, north = -90.0, west = 180.0, east = -180.0
 
-    init(name: String, isLive: Bool) {
+    /// Where registrations and type codes of aircraft come from.
+    private var database: AircraftDatabase?
+
+    init(name: String, isLive: Bool, database: AircraftDatabase?) {
         self.name = name
         self.isLive = isLive
+        self.database = database
+    }
+
+    /// Looks every aircraft up again in another database.
+    func use(_ database: AircraftDatabase?) {
+        self.database = database
+        for i in series.indices where series[i].kind == .aircraft { identify(i) }
+        revision += 1
     }
 
     var hasPositions: Bool { south <= north }
@@ -53,6 +77,17 @@ final class Dataset {
         index[id].flatMap { series[$0].name }
     }
 
+    /// Fills in what the aircraft database and the address ranges say.
+    private func identify(_ i: Int) {
+        let record = database?.lookup(series[i].id)
+        series[i].info.registration = record?.registration
+        series[i].info.typecode = record?.typecode
+        if let origin = Countries.lookup(icao24: series[i].id, registration: record?.registration) {
+            series[i].info.country = origin.country
+            series[i].info.flag = origin.flag
+        }
+    }
+
     /// Appends new data; within a series it must be newer than what is stored.
     func merge(_ batch: [Series]) {
         for item in batch {
@@ -67,6 +102,7 @@ final class Dataset {
             } else {
                 index[item.id] = series.count
                 series.append(item)
+                if item.kind == .aircraft { identify(series.count - 1) }
             }
         }
         revision += 1
@@ -81,38 +117,34 @@ final class Dataset {
         return result
     }
 
-    /// Track of one target up to time `t`, thinned for drawing. Reception
-    /// gaps longer than `dashedGap` become separate dashed segments.
+    /// Track of one target up to time `t`. Reception gaps longer than
+    /// `dashedGap` become separate dashed segments. Points are thinned where
+    /// the path is straight and kept where it bends.
     func track(for id: String, until t: Double) -> [TrackSegment] {
         guard let i = index[id] else { return [] }
         let positions = series[i].positions
         let count = Self.upperBound(positions.count) { positions[$0].t <= t }
         guard count > 0 else { return [] }
-        let step = max(1, (count + Self.maxTrackPoints - 1) / Self.maxTrackPoints)
         func point(_ p: Position) -> TrackPoint {
             TrackPoint(timestamp: p.t, latitude: p.latitude, longitude: p.longitude)
         }
 
         var segments: [TrackSegment] = []
-        var run: [TrackPoint] = [point(positions[0])]
-        var lastKept = 0
-        for j in 1..<max(1, count) {
-            if positions[j].t - positions[j - 1].t > Self.dashedGap {
-                if run.last?.timestamp != positions[j - 1].t { run.append(point(positions[j - 1])) }
-                segments.append(TrackSegment(points: run, isGap: false))
-                segments.append(TrackSegment(points: [point(positions[j - 1]), point(positions[j])], isGap: true))
-                run = [point(positions[j])]
-                lastKept = j
-            } else if j - lastKept >= step {
-                run.append(point(positions[j]))
-                lastKept = j
-            }
+        var previous: Position?
+        for run in simplifiedRuns(id, positions) {
+            guard let first = run.first, first.t <= t else { break }
+            if let previous { segments.append(TrackSegment(points: [point(previous), point(first)], isGap: true)) }
+            let shown = Self.upperBound(run.count) { run[$0].t <= t }
+            segments.append(TrackSegment(points: run[..<shown].map(point), isGap: false))
+            guard shown == run.count else { break }
+            previous = run.last
         }
-        let last = positions[count - 1]
-        if run.last?.timestamp != last.t { run.append(point(last)) }
-        segments.append(TrackSegment(points: run, isGap: false))
 
-        // Inside a gap, extend up to where the target is shown now.
+        // Up to the exact position now, between or beyond the kept points.
+        let last = positions[count - 1]
+        if let tail = segments.last?.points.last, tail.timestamp < last.t {
+            segments[segments.count - 1].points.append(point(last))
+        }
         if count < positions.count, t > last.t {
             let next = positions[count]
             let gap = next.t - last.t
@@ -129,10 +161,102 @@ final class Dataset {
         return segments
     }
 
-    /// One channel of one target over the whole dataset, thinned for plotting.
-    func samples(for id: String, _ channel: Channel) -> [Sample] {
+    /// The whole track of a target, split at long gaps and prepared for
+    /// drawing; cached for the target last asked for.
+    private func simplifiedRuns(_ id: String, _ positions: [Position]) -> [[Position]] {
+        if let cache = trackCache, cache.id == id, cache.revision == revision { return cache.runs }
+        var runs: [[Position]] = []
+        var start = 0
+        for j in 1...positions.count {
+            guard j == positions.count || positions[j].t - positions[j - 1].t > Self.dashedGap else { continue }
+            runs.append(Self.prepare(positions, start..<j))
+            start = j
+        }
+        trackCache = (id, revision, runs)
+        return runs
+    }
+
+    /// Thins one run where the path is straight, keeps nearly everything at
+    /// low speed, and rounds the path where reception was sparse.
+    private static func prepare(_ positions: [Position], _ range: Range<Int>) -> [Position] {
+        func location(_ p: Position) -> LatLon { LatLon(latitude: p.latitude, longitude: p.longitude) }
+        var keep = [Bool](repeating: false, count: range.count)
+        for k in Simplify.keep(range, tolerance: trackTolerance, deviation: { a, b, p in
+            offset(of: positions[p], from: positions[a], to: positions[b])
+        }) {
+            keep[k - range.lowerBound] = true
+        }
+
+        // On the ground and at low speed every movement is kept, down to
+        // `slowStep` metres, so that taxiing is drawn as it happened.
+        var anchor = positions[range.lowerBound]
+        for k in range.dropFirst() {
+            let dt = positions[k].t - positions[k - 1].t
+            let speed = dt > 0 ? Geo.distance(location(positions[k - 1]), location(positions[k])) / dt : 0
+            if keep[k - range.lowerBound] {
+                anchor = positions[k]
+            } else if speed < slowSpeed, Geo.distance(location(anchor), location(positions[k])) >= slowStep {
+                keep[k - range.lowerBound] = true
+                anchor = positions[k]
+            }
+        }
+        let kept = range.filter { keep[$0 - range.lowerBound] }
+
+        // Where two consecutive received positions are far apart in time, a
+        // straight line cuts the turn: a curve through the neighbouring
+        // points, at their speeds, is drawn instead.
+        func velocity(_ n: Int) -> (Double, Double) {
+            let a = positions[kept[max(0, n - 1)]], b = positions[kept[min(kept.count - 1, n + 1)]]
+            let dt = max(b.t - a.t, 1e-6)
+            return ((b.latitude - a.latitude) / dt, (b.longitude - a.longitude) / dt)
+        }
+        var result: [Position] = []
+        result.reserveCapacity(kept.count)
+        for n in kept.indices {
+            let a = positions[kept[n]]
+            result.append(a)
+            guard n + 1 < kept.count, kept[n + 1] == kept[n] + 1 else { continue }
+            let b = positions[kept[n + 1]]
+            let dt = b.t - a.t
+            guard dt > sparseInterval, Geo.distance(location(a), location(b)) > 200 else { continue }
+            let (va, vb) = (velocity(n), velocity(n + 1))
+            let steps = min(40, Int(dt / curveStep))
+            for step in 1..<max(1, steps) {
+                let u = Double(step) / Double(steps)
+                let h00 = 2 * u * u * u - 3 * u * u + 1, h10 = u * u * u - 2 * u * u + u
+                let h01 = -2 * u * u * u + 3 * u * u, h11 = u * u * u - u * u
+                result.append(Position(
+                    t: a.t + u * dt,
+                    latitude: h00 * a.latitude + h10 * dt * va.0 + h01 * b.latitude + h11 * dt * vb.0,
+                    longitude: h00 * a.longitude + h10 * dt * va.1 + h01 * b.longitude + h11 * dt * vb.1
+                ))
+            }
+        }
+        return result
+    }
+
+    /// Distance in metres from `p` to the segment `a`–`b`, on a local flat Earth.
+    private static func offset(of p: Position, from a: Position, to b: Position) -> Double {
+        let k = cos((a.latitude + b.latitude) / 2 * .pi / 180) * 111_320
+        func wrapped(_ degrees: Double) -> Double { (degrees + 540).truncatingRemainder(dividingBy: 360) - 180 }
+        let bx = wrapped(b.longitude - a.longitude) * k, by = (b.latitude - a.latitude) * 110_540
+        let px = wrapped(p.longitude - a.longitude) * k, py = (p.latitude - a.latitude) * 110_540
+        let length = bx * bx + by * by
+        let f = length > 0 ? min(1, max(0, (px * bx + py * by) / length)) : 0
+        return ((px - f * bx) * (px - f * bx) + (py - f * by) * (py - f * by)).squareRoot()
+    }
+
+    /// One channel of one target over the whole dataset, thinned for plotting:
+    /// flat stretches keep few points, changes keep their detail.
+    /// `run` numbers the stretches of continuous reception: it increases
+    /// whenever two consecutive samples are more than `gap` seconds apart.
+    func samples(for id: String, _ channel: Channel, gap: Double) -> [(sample: Sample, run: Int)] {
+        let key = "\(id) \(channel.rawValue) \(gap)"
+        if plotCache.revision != revision { plotCache = (revision, [:]) }
+        if let cached = plotCache.entries[key] { return cached }
         guard let i = index[id] else { return [] }
         var all = series[i].channels[channel.rawValue]
+        guard !all.isEmpty else { return [] }
         if channel == .altitude, all.count >= 3 {
             // Corrupted Mode S replies give isolated wild altitudes:
             // a median of three removes them.
@@ -142,9 +266,32 @@ final class Dataset {
                 all[j].v = max(min(a, b), min(max(a, b), c))
             }
         }
-        let step = max(1, (all.count + Self.maxPlotPoints - 1) / Self.maxPlotPoints)
-        guard step > 1 else { return all }
-        return stride(from: 0, to: all.count, by: step).map { all[$0] }
+
+        var bounds: [Range<Int>] = []
+        var start = 0
+        for j in 1...all.count where j == all.count || all[j].t - all[j - 1].t > gap {
+            bounds.append(start..<j)
+            start = j
+        }
+        let low = all.map(\.v).min() ?? 0, high = all.map(\.v).max() ?? 0
+        // Noisy series would keep everything: loosen until the plot is light.
+        var tolerance = max(1e-9, (high - low) * Self.plotTolerance)
+        var result: [(sample: Sample, run: Int)] = []
+        for _ in 0..<8 {
+            result.removeAll(keepingCapacity: true)
+            for (run, range) in bounds.enumerated() {
+                let kept = Simplify.keep(range, tolerance: tolerance) { a, b, p in
+                    // Vertical distance from the straight line between a and b.
+                    let f = (all[p].t - all[a].t) / max(all[b].t - all[a].t, 1e-9)
+                    return abs(all[p].v - (all[a].v + (all[b].v - all[a].v) * f))
+                }
+                result.append(contentsOf: kept.map { (all[$0], run) })
+            }
+            if result.count <= Self.maxPlotPoints { break }
+            tolerance *= 2
+        }
+        plotCache.entries[key] = result
+        return result
     }
 
     /// Position between two samples; along the great circle when they are far apart in time.

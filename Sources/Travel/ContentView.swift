@@ -3,21 +3,77 @@ import SwiftUI
 
 @main
 struct TravelApp: App {
-    @State private var state = AppState()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        WindowGroup("Travel") {
-            ContentView(state: state)
+        WindowGroup("Travel", id: AppDelegate.windowID) {
+            ContentView(state: delegate.state)
                 .preferredColorScheme(.dark)
                 .frame(minWidth: 1000, minHeight: 640)
         }
+        // Files and Dock clicks go through the delegate, into the one window.
+        .handlesExternalEvents(matching: [])
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Open Recording…") { chooseFiles(for: state) }
+                Button("Open Recording…") { chooseFiles(for: delegate.state) }
                     .keyboardShortcut("o")
+                Divider()
+                Menu("Aircraft Database") {
+                    let current = delegate.state.database
+                    Button((current.source == .jet1090 ? "✓ " : "") + "jet1090 Database") {
+                        delegate.state.useDatabase(.jet1090)
+                    }
+                    if case let .file(url) = current.source {
+                        Button("✓ " + url.lastPathComponent) {}
+                    }
+                    Button("Choose File…") { chooseDatabase(for: delegate.state) }
+                    if !current.problem.isEmpty {
+                        Divider()
+                        Text(current.problem)
+                    }
+                }
             }
         }
+    }
+}
+
+/// Owns the state so that it outlives the window, and handles what reaches
+/// the application rather than a window: Dock clicks and files dropped on
+/// the icon.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let windowID = "main"
+    /// Opens the main window; set by the window's content while it exists
+    /// and still valid after it closes.
+    static var openWindow: () -> Void = {}
+
+    let state = AppState()
+
+    /// Clicking the Dock icon with the window closed brings it back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { showWindow() }
+        return false
+    }
+
+    /// Files dropped on the icon behave like files dropped on the window.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        state.add(urls)
+        showWindow()
+    }
+
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    private func showWindow() {
+        if let window = NSApp.windows.first(where: { $0.canBecomeMain && $0.isVisible }) {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            Self.openWindow()
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
@@ -28,6 +84,15 @@ private func chooseFiles(for state: AppState) {
     panel.canChooseDirectories = false
     panel.message = "Choose jet1090 or ship162 recordings (.jsonl, .jsonl.zst or .jsonl.7z)"
     if panel.runModal() == .OK { state.add(panel.urls) }
+}
+
+@MainActor
+private func chooseDatabase(for state: AppState) {
+    let panel = NSOpenPanel()
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.message = "Choose an aircraft database: CSV (icao24, registration, typecode), .csv.gz, or BaseStation .sqb"
+    if panel.runModal() == .OK, let url = panel.url { state.useDatabase(.file(url)) }
 }
 
 private let utcFormatter: DateFormatter = {
@@ -62,12 +127,15 @@ private extension View {
 /// The map fills the window; everything else floats on it.
 struct ContentView: View {
     @Bindable var state: AppState
-    @State private var style: GlobeStyle = .satellite
+    @State private var style: GlobeStyle = .standard
     @State private var showTable = false
+    /// The sources panel is shown on request only.
+    @State private var showSources = false
     @State private var isDropTarget = false
     @State private var zoomRequest = 0
     @State private var headerHovered = false
     @State private var windowHeight: CGFloat = 800
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -91,21 +159,29 @@ struct ContentView: View {
                 if state.dataset != nil {
                     ClockBar(state: state)
                         .frame(maxWidth: 900)
+                        // Clear of the map's compass and zoom buttons.
+                        .padding(.trailing, 110)
                 }
             }
-            .padding(.leading, Layout.contentLeading)
+            .padding(.leading, panelVisible ? Layout.contentLeading : Layout.margin)
             .padding([.trailing, .bottom], Layout.margin)
             .padding(.top, Layout.header + 4)
 
-            SidePanel(state: state)
-                .frame(width: Layout.panelWidth)
-                .padding([.leading, .trailing, .bottom], Layout.margin)
-                .padding(.top, Layout.header + 4)
+            if panelVisible {
+                SidePanel(state: state, showSources: $showSources)
+                    .frame(width: Layout.panelWidth)
+                    .padding([.leading, .trailing], Layout.margin)
+                    .padding(.top, Layout.header + 4)
+                    // The map's logo and legal link stay visible under the panel.
+                    .padding(.bottom, Layout.margin + 26)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
 
             StatusOverlay(state: state)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.leading, Layout.contentLeading)
+                .padding(.leading, panelVisible ? Layout.contentLeading : 0)
         }
+        .animation(.snappy(duration: 0.25), value: panelVisible)
         .background {
             GeometryReader { geometry in
                 Color.clear
@@ -113,6 +189,10 @@ struct ContentView: View {
             }
         }
         .ignoresSafeArea()
+        .onAppear {
+            let open = openWindow
+            AppDelegate.openWindow = { open(id: AppDelegate.windowID) }
+        }
         .task { await applyLaunchOptions() }
         .dropDestination(for: URL.self) { urls, _ in
             state.add(urls)
@@ -130,8 +210,19 @@ struct ContentView: View {
         }
     }
 
+    /// The side panel exists for a selected target, or when sources are asked for.
+    private var panelVisible: Bool {
+        showSources || state.selectedID != nil
+    }
+
     private var controls: some View {
         HStack(spacing: 2) {
+            Toggle(isOn: $showSources) {
+                Image(systemName: "sidebar.left")
+            }
+            .toggleStyle(.button)
+            .help("Show live sources and recordings")
+
             Toggle(isOn: $showTable) {
                 Image(systemName: "tablecells")
             }
@@ -166,15 +257,20 @@ struct ContentView: View {
         .floatingPanel(corner: 12)
     }
 
+    private static var launchOptionsApplied = false
+
     /// Command-line options, mostly for testing:
     /// recordings, --live, --source redis://host:6379/a,b, --table,
-    /// --select <icao24 or mmsi>, --speed <factor>.
+    /// --zoom, --select <icao24 or mmsi>, --speed <factor>.
     private func applyLaunchOptions() async {
         let options = CommandLine.arguments
         let urls = options.dropFirst()
             .map { URL(fileURLWithPath: $0) }
             .filter(RecordingLoader.isSupported)
-        if !urls.isEmpty, state.sources.isEmpty { state.add(urls) }
+        if !urls.isEmpty, !Self.launchOptionsApplied { state.add(urls) }
+        // A reopened window must not replay the launch options.
+        guard !Self.launchOptionsApplied else { return }
+        Self.launchOptionsApplied = true
         if options.contains("--live"), let first = state.liveSources.first { state.start(first) }
         for (i, option) in options.enumerated() where option == "--source" && i + 1 < options.count {
             if let source = LiveSource(url: options[i + 1]) {
@@ -184,6 +280,10 @@ struct ContentView: View {
             }
         }
         if options.contains("--table") { showTable = true }
+        if options.contains("--zoom") {
+            while state.dataset == nil { try? await Task.sleep(for: .milliseconds(200)) }
+            zoomRequest += 1
+        }
         if let i = options.firstIndex(of: "--speed"), i + 1 < options.count, let speed = Double(options[i + 1]) {
             state.speed = speed
         }
@@ -296,13 +396,6 @@ private struct MapPane: View {
             style: style,
             focus: focus,
             zoomRequest: zoomRequest,
-            // Keeps the map's own controls and logo clear of what floats on it.
-            insets: NSEdgeInsets(
-                top: 0,
-                left: Layout.contentLeading,
-                bottom: state.dataset == nil ? 0 : Layout.clockHeight + 2 * Layout.margin,
-                right: 0
-            ),
             onSelect: { state.selectedID = $0 }
         )
     }
@@ -330,7 +423,9 @@ private struct StatusOverlay: View {
         } else if state.dataset == nil {
             panel {
                 Image(systemName: "square.and.arrow.down").font(.largeTitle)
-                Text("Drop a recording, or start a live source").font(.title2.weight(.semibold))
+                Text("Drop a recording here").font(.title2.weight(.semibold))
+                Label("Live sources and recordings are in the sources panel", systemImage: "sidebar.left")
+                    .foregroundStyle(.secondary)
                 Text("jet1090 and ship162 · .jsonl, .jsonl.zst or .jsonl.7z").foregroundStyle(.secondary)
                 Button("Open…") { chooseFiles(for: state) }
             }
@@ -349,6 +444,7 @@ private struct StatusOverlay: View {
 /// The floating panel: sources, or the selected target with its plots.
 private struct SidePanel: View {
     @Bindable var state: AppState
+    @Binding var showSources: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -356,10 +452,33 @@ private struct SidePanel: View {
             if let id = state.selectedID {
                 TargetDetail(state: state, id: id)
             } else {
+                HStack {
+                    Text("Sources")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    CloseButton { showSources = false }
+                }
+                .padding(.horizontal, 16)
                 SourceList(state: state)
             }
         }
         .floatingPanel()
+    }
+}
+
+private struct CloseButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.cancelAction)
+        .help("Close")
     }
 }
 
@@ -561,17 +680,12 @@ private struct TargetDetail: View {
         let entity = state.selected
         let kind = entity?.kind ?? state.dataset?.kind(of: id) ?? .aircraft
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                state.selectedID = nil
-            } label: {
-                Label("Sources", systemImage: "chevron.left")
-                    .font(.callout.weight(.medium))
+            HStack {
+                Spacer()
+                // The only way to deselect: clicking the map does not.
+                CloseButton { state.selectedID = nil }
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
             .padding(.horizontal, 16)
-            .padding(.bottom, 8)
-            .keyboardShortcut(.cancelAction)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -604,10 +718,14 @@ private struct TargetDetail: View {
 
     private func subtitle(_ entity: Entity?) -> String {
         var parts = [id.uppercased()]
-        if let entity, entity.kind == .ship {
-            parts.append(contentsOf: [entity.info.flag, entity.info.country].compactMap { $0 })
+        if let entity, entity.kind == .aircraft {
+            parts.append(contentsOf: [entity.info.registration, entity.info.typecode].compactMap { $0 })
         }
-        return parts.joined(separator: " ")
+        if let entity, entity.kind == .ship, let country = entity.info.country {
+            parts.append(country)
+        }
+        let text = parts.joined(separator: " · ")
+        return entity?.info.flag.map { "\($0) \(text)" } ?? text
     }
 
     @ViewBuilder
