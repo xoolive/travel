@@ -2,14 +2,46 @@ import Foundation
 import Network
 
 /// A configured live source: Redis pub/sub channels carrying jet1090 or
-/// ship162 JSON messages. Redis is the only kind of live source for now.
+/// ship162 JSON messages, or an SDR receiver plugged in locally.
 struct LiveSource: Identifiable, Codable, Hashable {
+    /// A local receiver, recognised again when plugged back in.
+    struct Device: Codable, Hashable {
+        var vendorID: Int
+        var productID: Int
+        /// Not always unique: RTL-SDR dongles often share theirs.
+        var serial: String?
+        /// Where it was plugged, to tell identical devices apart.
+        var locationID: Int
+        var model: String
+
+        init(_ device: UsbDevice) {
+            vendorID = device.vendorID
+            productID = device.productID
+            serial = device.serial
+            locationID = device.locationID
+            model = device.sdr?.name ?? device.product
+        }
+
+        /// The plugged device this refers to: same model and serial number,
+        /// preferring the same port when several match.
+        func match(in receivers: [UsbDevice]) -> UsbDevice? {
+            let candidates = receivers.filter {
+                $0.vendorID == vendorID && $0.productID == productID && $0.serial == serial
+            }
+            return candidates.first { $0.locationID == locationID } ?? candidates.first
+        }
+    }
+
     var id = UUID()
     var name: String
     /// host:port; the port defaults to 6379.
     var address: String
     /// Channel names separated by spaces or commas.
     var channels: String
+    /// Set for a local receiver; nil for Redis.
+    var device: Device?
+
+    var isDevice: Bool { device != nil }
 
     static let defaults = [template]
 

@@ -151,6 +151,14 @@ final class AppState {
         liveStatus[source.id] ?? .off
     }
 
+    /// USB devices, kept up to date as they are plugged and unplugged.
+    let usb = UsbMonitor()
+
+    /// The plugged receiver a device source refers to, if any.
+    func receiver(for source: LiveSource) -> UsbDevice? {
+        source.device?.match(in: usb.receivers)
+    }
+
     func isRunning(_ source: LiveSource) -> Bool {
         feeds[source.id] != nil
     }
@@ -161,7 +169,8 @@ final class AppState {
 
     /// Starts receiving from a source and displays the live view.
     func start(_ source: LiveSource) {
-        guard feeds[source.id] == nil else { return }
+        // Receivers are not connected to a decoder yet.
+        guard feeds[source.id] == nil, !source.isDevice else { return }
         let id = source.id
         let feed = LiveFeed(
             source: source,
