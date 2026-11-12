@@ -228,7 +228,7 @@ struct GlobeView: NSViewRepresentable {
         coordinator.onSelect = onSelect
         if coordinator.style != style {
             coordinator.style = style
-            map.preferredConfiguration = style.configuration
+            coordinator.applyStyle(to: map)
         }
         coordinator.syncFocus(focus, zoomRequest: zoomRequest, on: map)
         coordinator.syncTargets(entities, on: map)
@@ -241,6 +241,8 @@ struct GlobeView: NSViewRepresentable {
     final class Coordinator: NSObject, MKMapViewDelegate {
         static let reuseID = "target"
         private static let gapTitle = "gap"
+        private static let aboveTitle = "above"
+        private static let turbulentTitle = "turbulent"
         /// Degrees per direction bucket.
         private static let step = 3.0
         /// Direction buckets, plus one for "unknown".
@@ -259,6 +261,27 @@ struct GlobeView: NSViewRepresentable {
         private var icons: [Int: NSImage] = [:]
         private var hovered: TargetAnnotation?
         private var hoverCard: HoverCard?
+
+        /// What is drawn now, which differs from `style` far out: MapKit only
+        /// draws a globe with imagery, so the Standard style hands over to the
+        /// hybrid one when the camera is far enough to see the Earth as a whole.
+        private var drawn: GlobeStyle?
+        private var showsGlobe = true
+        /// Camera distances between which the hand-over happens, metres. Two
+        /// values so that it does not flicker around a single limit.
+        private static let globeAbove = 4_500_000.0
+        private static let flatBelow = 3_000_000.0
+
+        func applyStyle(to map: MKMapView) {
+            guard let style else { return }
+            let distance = map.camera.centerCoordinateDistance
+            if distance > Self.globeAbove { showsGlobe = true }
+            if distance < Self.flatBelow { showsGlobe = false }
+            let wanted: GlobeStyle = style == .standard && showsGlobe ? .hybrid : style
+            guard wanted != drawn else { return }
+            drawn = wanted
+            map.preferredConfiguration = wanted.configuration
+        }
 
         // MARK: Sync from SwiftUI
 
@@ -341,6 +364,7 @@ struct GlobeView: NSViewRepresentable {
                     segment.points.first?.timestamp ?? 0,
                     segment.points.last?.timestamp ?? 0,
                     segment.isGap ? 1 : 0,
+                    segment.mark == nil ? 0 : (segment.mark == .turbulent ? 2 : 1),
                 ]
                 if i < trackOverlays.count {
                     if trackOverlays[i].signature == signature { continue }
@@ -354,6 +378,7 @@ struct GlobeView: NSViewRepresentable {
                     ? MKGeodesicPolyline(coordinates: coordinates, count: coordinates.count)
                     : MKPolyline(coordinates: coordinates, count: coordinates.count)
                 line.title = segment.isGap ? Self.gapTitle : nil
+                if let mark = segment.mark { line.title = mark == .turbulent ? Self.turbulentTitle : Self.aboveTitle }
                 map.addOverlay(line, level: .aboveLabels)
                 if i < trackOverlays.count {
                     trackOverlays[i] = (signature, line)
@@ -556,6 +581,10 @@ struct GlobeView: NSViewRepresentable {
                 renderer.lineDashPattern = [2, 9]
                 renderer.strokeColor = NSColor.systemYellow.withAlphaComponent(0.75)
             }
+            if line.title == Self.aboveTitle || line.title == Self.turbulentTitle {
+                renderer.strokeColor = line.title == Self.turbulentTitle ? .systemRed : .systemOrange
+                renderer.lineWidth = 6
+            }
             renderer.lineCap = .round
             renderer.lineJoin = .round
             return renderer
@@ -573,6 +602,11 @@ struct GlobeView: NSViewRepresentable {
 
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             refreshIcons(on: mapView)
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            // Once the camera has settled, not during a gesture.
+            applyStyle(to: mapView)
         }
     }
 }

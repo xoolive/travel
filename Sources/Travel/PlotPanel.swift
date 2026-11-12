@@ -50,6 +50,12 @@ struct PlotStack: View {
         // Reading `revision` redraws the plots when live data arrives.
         let _ = state.revision
         VStack(alignment: .leading, spacing: 18) {
+            if kind == .aircraft, let dataset = state.dataset {
+                let minutes = dataset.turbulence(for: id)
+                if !minutes.isEmpty {
+                    TurbulenceChart(state: state, minutes: minutes)
+                }
+            }
             ForEach(PlotGroup.available(for: kind)) { group in
                 let content = build(group)
                 if !content.lines.isEmpty {
@@ -166,6 +172,79 @@ struct PlotStack: View {
             content.domain = (bottom - (bottom < 0 ? margin : 0))...(top + margin)
         }
         return content
+    }
+}
+
+/// Spread of the vertical-rate fluctuations per minute, against the
+/// turbulence threshold.
+private struct TurbulenceChart: View {
+    let state: AppState
+    let minutes: [TurbulenceMinute]
+
+    private enum Level: String, CaseIterable {
+        case turbulent = "Turbulent (2 min or more)"
+        case above = "Above threshold"
+        /// Above the threshold, but climbing, descending or turning: the
+        /// method does not count these minutes.
+        case aboveExcluded = "Above, not level cruise"
+        case below = "Below"
+        case excluded = "Not level cruise"
+
+        var color: Color {
+            switch self {
+            case .turbulent: .red
+            case .above: .orange
+            case .aboveExcluded: .orange.opacity(0.45)
+            case .below: .blue
+            case .excluded: .gray.opacity(0.7)
+            }
+        }
+    }
+
+    private func level(_ minute: TurbulenceMinute) -> Level {
+        if minute.isTurbulent { return .turbulent }
+        if minute.qualifies { return .above }
+        if !minute.passesChecks { return minute.spread >= Turbulence.threshold ? .aboveExcluded : .excluded }
+        return .below
+    }
+
+    var body: some View {
+        let levels = Level.allCases.filter { candidate in minutes.contains { level($0) == candidate } }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("TURBULENCE · VERTICAL RATE SPREAD (FT/MIN)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Chart {
+                ForEach(minutes.indices, id: \.self) { i in
+                    RectangleMark(
+                        xStart: .value("Start", Date(timeIntervalSince1970: minutes[i].start + 3)),
+                        xEnd: .value("End", Date(timeIntervalSince1970: minutes[i].start + 57)),
+                        yStart: .value("Zero", 0),
+                        yEnd: .value("Spread", minutes[i].spread)
+                    )
+                    .foregroundStyle(by: .value("Level", level(minutes[i]).rawValue))
+                }
+                RuleMark(y: .value("Threshold", Turbulence.threshold))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            }
+            .chartForegroundStyleScale(domain: levels.map(\.rawValue), range: levels.map(\.color))
+            .chartYScale(domain: 0...max(Turbulence.threshold * 1.25, (minutes.map(\.spread).max() ?? 0) * 1.1))
+            .chartXScale(domain: Date(timeIntervalSince1970: state.rangeStart)...Date(timeIntervalSince1970: max(state.rangeEnd, state.rangeStart + 1)))
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                    AxisGridLine()
+                    AxisValueLabel(format: state.rangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 4))
+            }
+            .chartOverlay { proxy in
+                Playhead(state: state, proxy: proxy)
+            }
+            .frame(height: 130)
+        }
     }
 }
 

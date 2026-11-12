@@ -35,6 +35,7 @@ final class Dataset {
 
     private var index: [String: Int] = [:]
     private var trackCache: (id: String, revision: Int, runs: [[Position]])?
+    private var turbulenceCache: (id: String, revision: Int, minutes: [TurbulenceMinute])?
     private var plotCache: (revision: Int, entries: [String: [(sample: Sample, run: Int)]]) = (0, [:])
     private var south = 90.0, north = -90.0, west = 180.0, east = -180.0
 
@@ -158,7 +159,34 @@ final class Dataset {
                 }
             }
         }
+        // Minutes above the turbulence threshold are drawn over the track.
+        for minute in turbulence(for: id) where minute.qualifies && minute.start <= t {
+            let from = Self.upperBound(positions.count) { positions[$0].t < minute.start }
+            let to = Self.upperBound(positions.count) { positions[$0].t <= min(t, minute.start + 60) }
+            guard to - from >= 2 else { continue }
+            segments.append(TrackSegment(
+                points: positions[from..<to].map(point), isGap: false,
+                mark: minute.isTurbulent ? .turbulent : .aboveThreshold
+            ))
+        }
         return segments
+    }
+
+    /// Minute-by-minute turbulence measure of an aircraft; cached for the
+    /// target last asked for.
+    func turbulence(for id: String) -> [TurbulenceMinute] {
+        if let cache = turbulenceCache, cache.id == id, cache.revision == revision { return cache.minutes }
+        guard let i = index[id], series[i].kind == .aircraft else { return [] }
+        let channels = series[i].channels
+        let minutes = Turbulence.analyse(
+            barometric: channels[Channel.vrateBarometric.rawValue],
+            inertial: channels[Channel.vrateInertial.rawValue],
+            verticalRate: channels[Channel.verticalRate.rawValue],
+            track: channels[Channel.track.rawValue],
+            altitude: channels[Channel.altitude.rawValue]
+        )
+        turbulenceCache = (id, revision, minutes)
+        return minutes
     }
 
     /// The whole track of a target, split at long gaps and prepared for
