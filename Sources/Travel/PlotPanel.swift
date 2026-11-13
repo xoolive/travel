@@ -56,6 +56,16 @@ struct PlotStack: View {
                     TurbulenceChart(state: state, minutes: minutes)
                 }
             }
+            if kind == .aircraft, let dataset = state.dataset {
+                let uplinks = dataset.uplinks(of: id)
+                if !uplinks.isEmpty {
+                    InterrogationChart(state: state, uplinks: uplinks)
+                }
+                let messages = dataset.datalink(of: id)
+                if !messages.isEmpty {
+                    DatalinkList(state: state, messages: messages)
+                }
+            }
             ForEach(PlotGroup.available(for: kind)) { group in
                 let content = build(group)
                 if !content.lines.isEmpty {
@@ -244,6 +254,149 @@ private struct TurbulenceChart: View {
                 Playhead(state: state, proxy: proxy)
             }
             .frame(height: 130)
+        }
+    }
+}
+
+/// Who interrogated the aircraft, and for what: one row per interrogator
+/// (radars by their II or SI code, other aircraft's TCAS), one tick per
+/// interrogation, coloured by what it asked for.
+private struct InterrogationChart: View {
+    let state: AppState
+    let uplinks: [Uplink]
+
+    /// Rows beyond this are grouped.
+    private static let maxRows = 8
+    private static let palette: [Color] = [.blue, .orange, .green, .pink, .purple, .yellow, .cyan, .brown, .gray]
+
+    var body: some View {
+        let (rows, requests) = categories()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("INTERROGATIONS (1030 MHZ) · " + span.lowerBound.formatted(axisTime) + "–" + span.upperBound.formatted(axisTime))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(uplinks.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Chart {
+                ForEach(uplinks.indices, id: \.self) { i in
+                    let uplink = uplinks[i]
+                    PointMark(
+                        x: .value("Time", Date(timeIntervalSince1970: uplink.t)),
+                        y: .value("From", row(uplink, rows))
+                    )
+                    .symbol(.square)
+                    .symbolSize(uplink.origin == .resolution ? 60 : 10)
+                    .foregroundStyle(by: .value("Request", request(uplink, requests)))
+                }
+            }
+            .chartForegroundStyleScale(domain: requests, range: Array(Self.palette.prefix(requests.count)))
+            .chartYScale(domain: rows)
+            // Uplink files often cover part of the flight: show their span.
+            .chartXScale(domain: span)
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                    AxisGridLine()
+                    AxisValueLabel(format: state.rangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading) { _ in
+                    AxisValueLabel()
+                }
+            }
+            .chartOverlay { proxy in
+                Playhead(state: state, proxy: proxy)
+            }
+            .frame(height: CGFloat(rows.count) * 16 + 40)
+        }
+    }
+
+    private var span: ClosedRange<Date> {
+        let first = uplinks.first?.t ?? state.rangeStart, last = uplinks.last?.t ?? state.rangeEnd
+        let margin = max(10, (last - first) * 0.03)
+        return Date(timeIntervalSince1970: first - margin)...Date(timeIntervalSince1970: last + margin)
+    }
+
+    /// The busiest interrogators get a row each, TCAS last.
+    private func categories() -> (rows: [String], requests: [String]) {
+        var counts: [String: Int] = [:]
+        for uplink in uplinks { counts[uplink.originLabel, default: 0] += 1 }
+        let airborne = ["TCAS", "TCAS RA"]
+        var rows = counts.keys.filter { !airborne.contains($0) }.sorted { counts[$0]! > counts[$1]! }
+        if rows.count > Self.maxRows { rows = Array(rows.prefix(Self.maxRows - 1)) + ["Other"] }
+        rows += airborne.filter { counts[$0] != nil }
+
+        var requestCounts: [String: Int] = [:]
+        for uplink in uplinks { requestCounts[uplink.requestLabel, default: 0] += 1 }
+        var requests = requestCounts.keys.sorted { requestCounts[$0]! > requestCounts[$1]! }
+        if requests.count > Self.palette.count { requests = Array(requests.prefix(Self.palette.count - 1)) + ["Other"] }
+        return (rows, requests)
+    }
+
+    private func row(_ uplink: Uplink, _ rows: [String]) -> String {
+        rows.contains(uplink.originLabel) ? uplink.originLabel : "Other"
+    }
+
+    private func request(_ uplink: Uplink, _ requests: [String]) -> String {
+        requests.contains(uplink.requestLabel) ? uplink.requestLabel : "Other"
+    }
+}
+
+/// Datalink messages up to the current time, newest first.
+private struct DatalinkList: View {
+    let state: AppState
+    let messages: [DatalinkMessage]
+
+    var body: some View {
+        let shown = messages.filter { $0.t <= state.currentTime }.reversed()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("DATALINK (VDL2)")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(shown.count) of \(messages.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            if shown.isEmpty {
+                Text("None yet at this time")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(Array(shown.prefix(30).enumerated()), id: \.offset) { _, message in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Image(systemName: message.fromAircraft ? "arrow.down.right" : "arrow.up.right")
+                            .foregroundStyle(message.fromAircraft ? .orange : .cyan)
+                            .help(message.fromAircraft ? "Sent by the aircraft" : "Sent by the ground station")
+                        Text(Date(timeIntervalSince1970: message.t), format: axisTime.second(.twoDigits))
+                            .monospacedDigit()
+                        Text(message.summary)
+                            .fontWeight(.medium)
+                        Spacer(minLength: 4)
+                        Text([message.channels.first.map { String(format: "%.3f", $0) + (message.channels.count > 1 ? " +\(message.channels.count - 1)" : "") },
+                              message.station?.uppercased()]
+                            .compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .help(message.channels.sorted().map { String(format: "%.3f MHz", $0) }.joined(separator: ", "))
+                    }
+                    if let text = message.text, !text.isEmpty {
+                        Text(text)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(4)
+                    }
+                }
+                .font(.caption)
+            }
         }
     }
 }

@@ -73,7 +73,11 @@ final class Builder {
               let t = number(message, "timestamp")
         else { return }
 
-        if let mmsi = message["mmsi"] as? NSNumber {
+        if let format = message["uf"] as? String {
+            uplink(message, format: Int(format) ?? -1, t: t)
+        } else if message["bearer"] as? String == "vdl2" {
+            datalink(message, t: t)
+        } else if let mmsi = message["mmsi"] as? NSNumber {
             ship(message, id: String(mmsi.int64Value), t: t)
         } else if let icao24 = message["icao24"] as? String {
             aircraft(message, id: icao24, t: t)
@@ -122,6 +126,91 @@ final class Builder {
                 collect(register, Self.aircraftChannels, into: i, t: t)
             }
         }
+    }
+
+    /// Interrogations carry the target address in their parity; "ffffff"
+    /// is the broadcast address of all-calls. A series created here has no
+    /// activity: it only shows once the aircraft itself is heard.
+    private func uplink(_ message: NSDictionary, format: Int, t: Double) {
+        var target = message["icao24"] as? String
+        let kind = message["kind"] as? String
+        // ACAS broadcasts name their sender in `mid`.
+        if format == 16, let sender = message["mid"] as? String { target = sender }
+        guard let target, target != "ffffff" else { return }
+        let origin: Uplink.Origin
+        switch format {
+        case 0: origin = .acas
+        case 16: origin = kind == "resolution" ? .resolution : .acas
+        case 24: origin = .elm
+        default: origin = .radar(text(message, "interrogator"))
+        }
+        let i = slot(target, .aircraft)
+        series[i].uplinks.append(Uplink(t: t, uplinkFormat: format, origin: origin, register: text(message, "bds")))
+    }
+
+    private func datalink(_ message: NSDictionary, t: Double) {
+        guard let body = message["message"] as? NSDictionary,
+              let avlc = Self.layer(body, "avlc")
+        else { return }
+        let source = avlc["src"] as? NSDictionary
+        let destination = avlc["dst"] as? NSDictionary
+        let fromAircraft = source?["addr_type"] as? String == "aircraft"
+        let aircraft = (message["aircraft"] as? NSDictionary)?["icao24"] as? String
+            ?? (fromAircraft ? source : destination)?["icao24"] as? String
+        guard let aircraft else { return }
+        let station = (fromAircraft ? destination : source)?["icao24"] as? String
+        let channel = ((message["receiver"] as? NSDictionary)?["channel_hz"] as? NSNumber).map { $0.doubleValue / 1e6 }
+
+        // The innermost known layer names the message.
+        var summary = "Frame"
+        var text: String?
+        if let payload = avlc["payload"] as? NSDictionary {
+            if let acars = Self.layer(payload, "acars") {
+                let label = acars["label"] as? String ?? ""
+                summary = "ACARS \(label)".trimmingCharacters(in: .whitespaces)
+                text = (acars["msg_text"] ?? acars["text"] ?? acars["message"]) as? String
+            } else if let x25 = Self.layer(payload, "x25") {
+                summary = "X.25 " + (x25["packet_type"] as? String ?? "packet")
+            } else if let kind = payload["kind"] as? String {
+                summary = kind.uppercased()
+            } else if let first = payload.allKeys.first as? String {
+                summary = first.uppercased()
+            }
+        } else if let control = avlc["lcf"] as? String {
+            // Older recordings only name the frame type.
+            summary = ["S": "Supervisory", "I": "Information", "U": "Unnumbered"][control] ?? "Frame"
+        } else if let control = avlc["lcf"] as? NSDictionary {
+            if let supervisory = control["S"] as? NSDictionary {
+                summary = (supervisory["sfunc"] as? String).map(Self.spaced) ?? "Supervisory"
+            } else if control["I"] != nil {
+                summary = "Information"
+            } else if let unnumbered = control["U"] as? NSDictionary {
+                summary = (unnumbered["mfunc"] as? String).map(Self.spaced) ?? "Unnumbered"
+            }
+        }
+
+        let i = slot(aircraft, .aircraft)
+        series[i].datalink.append(DatalinkMessage(
+            t: t, channel: channel, station: station, fromAircraft: fromAircraft, summary: summary, text: text
+        ))
+    }
+
+    /// A protocol layer, written `{"avlc": {…}}` now and
+    /// `{"kind": "avlc", "data": {…}}` in older recordings.
+    private static func layer(_ container: NSDictionary, _ name: String) -> NSDictionary? {
+        if let layer = container[name] as? NSDictionary { return layer }
+        if container["kind"] as? String == name { return container["data"] as? NSDictionary }
+        return nil
+    }
+
+    /// "ReceiveReady" becomes "Receive ready".
+    private static func spaced(_ name: String) -> String {
+        var result = ""
+        for character in name {
+            if character.isUppercase, !result.isEmpty { result.append(" ") }
+            result.append(result.isEmpty ? character : Character(character.lowercased()))
+        }
+        return result
     }
 
     private func ship(_ message: NSDictionary, id: String, t: Double) {

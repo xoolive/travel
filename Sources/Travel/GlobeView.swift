@@ -199,6 +199,7 @@ struct GlobeView: NSViewRepresentable {
     var entities: [Entity]
     var selectedID: String?
     var track: [TrackSegment]
+    var marks: [TrackMark] = []
     var style: GlobeStyle
     var focus: MapFocus?
     /// Incremented to frame the data closely.
@@ -234,6 +235,7 @@ struct GlobeView: NSViewRepresentable {
         coordinator.syncTargets(entities, on: map)
         coordinator.syncSelection(selectedID, on: map)
         coordinator.syncTrack(track, on: map)
+        coordinator.syncMarks(marks, on: map)
         coordinator.refreshIcons(on: map)
     }
 
@@ -389,6 +391,55 @@ struct GlobeView: NSViewRepresentable {
             if trackOverlays.count > track.count {
                 map.removeOverlays(trackOverlays[track.count...].map(\.line))
                 trackOverlays.removeSubrange(track.count...)
+            }
+        }
+
+        // MARK: Track marks
+
+        final class MarkAnnotation: NSObject, MKAnnotation {
+            let mark: TrackMark
+            var coordinate: CLLocationCoordinate2D {
+                CLLocationCoordinate2D(latitude: mark.position.latitude, longitude: mark.position.longitude)
+            }
+            var title: String? { mark.label }
+
+            init(_ mark: TrackMark) { self.mark = mark }
+        }
+
+        private var markAnnotations: [String: MarkAnnotation] = [:]
+
+        func syncMarks(_ marks: [TrackMark], on map: MKMapView) {
+            let wanted = Dictionary(uniqueKeysWithValues: marks.map { ($0.id, $0) })
+            let stale = markAnnotations.filter { wanted[$0.key] != $0.value.mark }
+            if !stale.isEmpty {
+                map.removeAnnotations(Array(stale.values))
+                for id in stale.keys { markAnnotations[id] = nil }
+            }
+            let added = marks.filter { markAnnotations[$0.id] == nil }.map(MarkAnnotation.init)
+            for annotation in added { markAnnotations[annotation.mark.id] = annotation }
+            if !added.isEmpty { map.addAnnotations(added) }
+        }
+
+        private static func markImage(_ kind: TrackMark.Kind) -> NSImage {
+            let color: NSColor = switch kind {
+            case .datalinkDown: .systemOrange
+            case .datalinkUp: .systemCyan
+            case .resolution: .systemRed
+            }
+            let symbol = kind == .resolution ? "exclamationmark.triangle.fill" : "envelope.fill"
+            let configuration = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+            let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)
+            return NSImage(size: NSSize(width: 20, height: 20), flipped: false) { rect in
+                color.setFill()
+                NSBezierPath(ovalIn: rect.insetBy(dx: 1.5, dy: 1.5)).fill()
+                NSColor.black.withAlphaComponent(0.5).setStroke()
+                NSBezierPath(ovalIn: rect.insetBy(dx: 1.5, dy: 1.5)).stroke()
+                if let glyph {
+                    let size = glyph.size
+                    glyph.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height))
+                }
+                return true
             }
         }
 
@@ -556,6 +607,14 @@ struct GlobeView: NSViewRepresentable {
         // MARK: MKMapViewDelegate
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if let mark = annotation as? MarkAnnotation {
+                let view = MKAnnotationView(annotation: mark, reuseIdentifier: nil)
+                view.image = Self.markImage(mark.mark.kind)
+                view.toolTip = mark.mark.label
+                view.displayPriority = .required
+                view.zPriority = .min
+                return view
+            }
             guard let annotation = annotation as? TargetAnnotation else { return nil }
             let view = mapView.dequeueReusableAnnotationView(withIdentifier: Self.reuseID, for: annotation)
             view.canShowCallout = false
@@ -591,6 +650,10 @@ struct GlobeView: NSViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            if let mark = view.annotation as? MarkAnnotation {
+                mapView.deselectAnnotation(mark, animated: false)
+                return
+            }
             guard let annotation = view.annotation as? TargetAnnotation else { return }
             // MapKit must not keep a selection of its own: clicking the map
             // would clear it, and clicking the same target again would be ignored.

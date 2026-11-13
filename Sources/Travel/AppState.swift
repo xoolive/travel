@@ -66,6 +66,8 @@ final class AppState {
     private(set) var revision = 0
     private(set) var entities: [Entity] = []
     private(set) var selectedTrack: [TrackSegment] = []
+    /// Datalink and TCAS events of the selected aircraft, up to now.
+    private(set) var selectedMarks: [TrackMark] = []
     private(set) var rangeStart = 0.0
     private(set) var rangeEnd = 1.0
     /// 0...1 while files are loading.
@@ -420,9 +422,27 @@ final class AppState {
     private func refreshTrack() {
         guard let dataset, let id = selectedID else {
             if !selectedTrack.isEmpty { selectedTrack = [] }
+            if !selectedMarks.isEmpty { selectedMarks = [] }
             return
         }
         let track = dataset.track(for: id, until: currentTime)
         if track != selectedTrack { selectedTrack = track }
+
+        var marks: [TrackMark] = []
+        let time = Date.FormatStyle(timeZone: .gmt).hour(.twoDigits(amPM: .omitted)).minute().second()
+        for (n, message) in dataset.datalink(of: id).enumerated() where message.t <= currentTime {
+            guard let position = dataset.position(of: id, at: message.t) else { continue }
+            let when = Date(timeIntervalSince1970: message.t).formatted(time)
+            marks.append(TrackMark(
+                id: "d\(n)", kind: message.fromAircraft ? .datalinkDown : .datalinkUp,
+                position: position, label: "\(when)  \(message.summary)"
+            ))
+        }
+        for (n, uplink) in dataset.uplinks(of: id).enumerated() where uplink.origin == .resolution && uplink.t <= currentTime {
+            guard let position = dataset.position(of: id, at: uplink.t) else { continue }
+            let when = Date(timeIntervalSince1970: uplink.t).formatted(time)
+            marks.append(TrackMark(id: "r\(n)", kind: .resolution, position: position, label: "\(when)  TCAS resolution coordination"))
+        }
+        if marks != selectedMarks { selectedMarks = marks }
     }
 }

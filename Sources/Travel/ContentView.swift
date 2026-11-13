@@ -393,6 +393,7 @@ private struct MapPane: View {
             entities: state.entities,
             selectedID: state.selectedID,
             track: state.selectedTrack,
+            marks: state.selectedMarks,
             style: style,
             focus: focus,
             zoomRequest: zoomRequest,

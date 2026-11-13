@@ -58,6 +58,20 @@ struct TrackSegment: Sendable, Equatable {
     var mark: Mark?
 }
 
+/// An event placed on the selected aircraft's track.
+struct TrackMark: Sendable, Equatable, Identifiable {
+    enum Kind: Sendable, Equatable {
+        case datalinkUp
+        case datalinkDown
+        case resolution
+    }
+
+    var id: String
+    var kind: Kind
+    var position: LatLon
+    var label: String
+}
+
 /// Slow-changing text attributes; the latest value wins.
 struct Info: Sendable, Equatable {
     /// From the aircraft database.
@@ -88,6 +102,64 @@ struct Info: Sendable, Equatable {
     }
 }
 
+/// A Mode S interrogation sent to an aircraft, as received on 1030 MHz.
+struct Uplink: Sendable, Equatable {
+    enum Origin: Sendable, Equatable, Hashable {
+        /// A ground radar, with its interrogator code (II or SI) when known.
+        case radar(String?)
+        /// Another aircraft's collision avoidance system (UF 0 and UF 16).
+        case acas
+        /// TCAS coordination of a resolution advisory (UF 16).
+        case resolution
+        /// Extended length message (UF 24, Comm-C).
+        case elm
+    }
+
+    var t: Double
+    var uplinkFormat: Int
+    var origin: Origin
+    /// Comm-B register requested, such as `40`, when the interrogation asks for one.
+    var register: String?
+
+    var originLabel: String {
+        switch origin {
+        case let .radar(code): code ?? "Radar"
+        case .acas: "TCAS"
+        case .resolution: "TCAS RA"
+        case .elm: "ELM"
+        }
+    }
+
+    var requestLabel: String {
+        if let register { return "BDS \(register.prefix(1)),\(register.dropFirst())" }
+        switch uplinkFormat {
+        case 4: return "Altitude"
+        case 5: return "Identity"
+        case 0, 16: return "Air-air"
+        case 11: return "All-call"
+        case 24: return "Comm-C"
+        default: return "UF \(uplinkFormat)"
+        }
+    }
+}
+
+/// A datalink message exchanged with a ground station over VDL mode 2.
+struct DatalinkMessage: Sendable, Equatable {
+    var t: Double
+    /// MHz; when the same frame was decoded on several channels, the first.
+    var channel: Double?
+    /// Every channel the frame was decoded on, MHz.
+    var channels: [Double] = []
+    /// ICAO address of the ground station.
+    var station: String?
+    /// The aircraft sent it (true) or received it (false).
+    var fromAircraft: Bool
+    /// What the frame carries, in a few words.
+    var summary: String
+    /// Decoded text, for ACARS messages.
+    var text: String?
+}
+
 /// Everything received about one aircraft or ship, time-ordered.
 struct Series: Sendable {
     let id: String
@@ -99,8 +171,13 @@ struct Series: Sendable {
     var positions: [Position] = []
     /// Indexed by `Channel.rawValue`.
     var channels: [[Sample]] = Array(repeating: [], count: Channel.allCases.count)
+    /// Interrogations received for this aircraft, from an uplink file.
+    var uplinks: [Uplink] = []
+    var datalink: [DatalinkMessage] = []
 
     mutating func append(_ other: Series) {
+        uplinks.append(contentsOf: other.uplinks)
+        datalink.append(contentsOf: other.datalink)
         name = other.name ?? name
         info.merge(other.info)
         activity.append(contentsOf: other.activity)
@@ -111,6 +188,8 @@ struct Series: Sendable {
     /// Restores time order after merging files that overlap or arrive unordered.
     mutating func sortIfNeeded() {
         if !zip(activity, activity.dropFirst()).allSatisfy({ $0 <= $1 }) { activity.sort() }
+        if !zip(uplinks, uplinks.dropFirst()).allSatisfy({ $0.t <= $1.t }) { uplinks.sort { $0.t < $1.t } }
+        if !zip(datalink, datalink.dropFirst()).allSatisfy({ $0.t <= $1.t }) { datalink.sort { $0.t < $1.t } }
         if !zip(positions, positions.dropFirst()).allSatisfy({ $0.t <= $1.t }) { positions.sort { $0.t < $1.t } }
         for i in channels.indices
         where !zip(channels[i], channels[i].dropFirst()).allSatisfy({ $0.t <= $1.t }) {

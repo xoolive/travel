@@ -67,7 +67,43 @@ final class Dataset {
     }
 
     func count(of kind: Kind) -> Int {
-        series.reduce(0) { $0 + ($1.kind == kind ? 1 : 0) }
+        series.reduce(0) { $0 + ($1.kind == kind && !$1.activity.isEmpty ? 1 : 0) }
+    }
+
+    func uplinks(of id: String) -> [Uplink] {
+        index[id].map { series[$0].uplinks } ?? []
+    }
+
+    /// The same frame is often decoded on neighbouring channels at once:
+    /// such copies are merged, keeping the list of channels.
+    func datalink(of id: String) -> [DatalinkMessage] {
+        guard let i = index[id] else { return [] }
+        var merged: [DatalinkMessage] = []
+        for message in series[i].datalink {
+            if let last = merged.last, message.t - last.t < 1,
+               last.summary == message.summary, last.text == message.text,
+               last.station == message.station, last.fromAircraft == message.fromAircraft {
+                if let channel = message.channel { merged[merged.count - 1].channels.append(channel) }
+                continue
+            }
+            var first = message
+            first.channels = message.channel.map { [$0] } ?? []
+            merged.append(first)
+        }
+        return merged
+    }
+
+    /// Where an aircraft was at time `t`, between received positions.
+    func position(of id: String, at t: Double) -> LatLon? {
+        guard let i = index[id] else { return nil }
+        let positions = series[i].positions
+        let after = Self.upperBound(positions.count) { positions[$0].t <= t }
+        guard after > 0 else { return positions.first.map { LatLon(latitude: $0.latitude, longitude: $0.longitude) } }
+        let p = positions[after - 1]
+        guard after < positions.count, positions[after].t - p.t <= Self.maxBridge else {
+            return LatLon(latitude: p.latitude, longitude: p.longitude)
+        }
+        return Self.interpolate(p, positions[after], at: t)
     }
 
     func kind(of id: String) -> Kind? {
@@ -92,8 +128,12 @@ final class Dataset {
     /// Appends new data; within a series it must be newer than what is stored.
     func merge(_ batch: [Series]) {
         for item in batch {
-            if let first = item.activity.first { start = min(start, first) }
-            if let last = item.activity.last { end = max(end, last) }
+            // Interrogations and datalink also extend the time range, so that
+            // a file of either alone can be replayed.
+            let times = [item.activity.first, item.activity.last, item.uplinks.first?.t, item.uplinks.last?.t,
+                         item.datalink.first?.t, item.datalink.last?.t].compactMap { $0 }
+            if let first = times.min() { start = min(start, first) }
+            if let last = times.max() { end = max(end, last) }
             for p in item.positions {
                 south = min(south, p.latitude); north = max(north, p.latitude)
                 west = min(west, p.longitude); east = max(east, p.longitude)
