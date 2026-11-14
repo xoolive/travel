@@ -355,7 +355,7 @@ private struct DatalinkList: View {
         let shown = messages.filter { $0.t <= state.currentTime }.reversed()
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("DATALINK (VDL2)")
+                Text("DATALINK")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -380,13 +380,16 @@ private struct DatalinkList: View {
                             .fontWeight(.medium)
                         Spacer(minLength: 4)
                         Text([message.channels.first.map { String(format: "%.3f", $0) + (message.channels.count > 1 ? " +\(message.channels.count - 1)" : "") },
-                              message.station?.uppercased()]
+                              message.stationName?.split(separator: " ").first.map(String.init)
+                                ?? message.station?.uppercased()]
                             .compactMap { $0 }.joined(separator: " · "))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .fixedSize()
-                            .help(message.channels.sorted().map { String(format: "%.3f MHz", $0) }.joined(separator: ", "))
+                            .help(([message.stationName.map { "\($0) (\(message.station?.uppercased() ?? ""))" }]
+                                   + message.channels.sorted().map { String(format: "%.3f MHz", $0) })
+                                .compactMap { $0 }.joined(separator: "\n"))
                     }
                     if let text = message.text, !text.isEmpty {
                         Text(text)

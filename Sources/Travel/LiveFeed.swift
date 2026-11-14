@@ -47,7 +47,7 @@ struct LiveSource: Identifiable, Codable, Hashable {
 
     /// Prefilled values for a new source.
     static var template: LiveSource {
-        LiveSource(name: "Redis", address: "127.0.0.1:6379", channels: "jet1090 ship162")
+        LiveSource(name: "Redis", address: "127.0.0.1:6379", channels: "jet1090 ship162 datalink-*")
     }
 
     var channelList: [String] {
@@ -161,7 +161,13 @@ final class LiveFeed: @unchecked Sendable {
             guard let self, current == self.attempt else { return }
             switch state {
             case .ready:
-                let command = "SUBSCRIBE \(self.source.channelList.joined(separator: " "))\r\n"
+                // Names with wildcards, such as datalink-*, are patterns.
+                let isPattern: (String) -> Bool = { $0.contains { "*?[".contains($0) } }
+                let channels = self.source.channelList.filter { !isPattern($0) }
+                let patterns = self.source.channelList.filter(isPattern)
+                var command = ""
+                if !channels.isEmpty { command += "SUBSCRIBE \(channels.joined(separator: " "))\r\n" }
+                if !patterns.isEmpty { command += "PSUBSCRIBE \(patterns.joined(separator: " "))\r\n" }
                 connection.send(content: Data(command.utf8), completion: .contentProcessed { _ in })
                 self.onStatus(.connected)
                 self.receive(connection, attempt: current)
@@ -217,10 +223,13 @@ final class LiveFeed: @unchecked Sendable {
                 var position = consumed
                 guard let node = Self.parse(bytes, &position) else { break }
                 consumed = position
-                // Pushed messages are ["message", channel, payload].
-                if case let .array(items) = node, items.count == 3,
-                   case let .bulk(kind) = items[0], kind.count == 7, bytes[kind.lowerBound] == UInt8(ascii: "m"),
-                   case let .bulk(payload) = items[2] {
+                // Pushed messages are ["message", channel, payload], or
+                // ["pmessage", pattern, channel, payload] for patterns.
+                guard case let .array(items) = node, items.count >= 3,
+                      case let .bulk(kind) = items[0], case let .bulk(payload) = items[items.count - 1]
+                else { continue }
+                let name = String(decoding: UnsafeRawBufferPointer(rebasing: bytes[kind]), as: UTF8.self)
+                if (name == "message" && items.count == 3) || (name == "pmessage" && items.count == 4) {
                     builder.ingest(line: UnsafeRawBufferPointer(rebasing: bytes[payload]))
                 }
             }

@@ -152,6 +152,8 @@ struct DatalinkMessage: Sendable, Equatable {
     var channels: [Double] = []
     /// ICAO address of the ground station.
     var station: String?
+    /// Where the ground station is, when the decoder knows it.
+    var stationName: String?
     /// The aircraft sent it (true) or received it (false).
     var fromAircraft: Bool
     /// What the frame carries, in a few words.
@@ -174,10 +176,18 @@ struct Series: Sendable {
     /// Interrogations received for this aircraft, from an uplink file.
     var uplinks: [Uplink] = []
     var datalink: [DatalinkMessage] = []
+    /// Coarse positions reported along with datalink messages (Airframes.io
+    /// flight tracking, about 0.1°), kept apart from received positions.
+    var reported: [Position] = []
+
+    /// Received positions, or the reported ones for an aircraft only heard
+    /// on datalink.
+    var track: [Position] { positions.isEmpty ? reported : positions }
 
     mutating func append(_ other: Series) {
         uplinks.append(contentsOf: other.uplinks)
         datalink.append(contentsOf: other.datalink)
+        reported.append(contentsOf: other.reported)
         name = other.name ?? name
         info.merge(other.info)
         activity.append(contentsOf: other.activity)
@@ -191,6 +201,7 @@ struct Series: Sendable {
         if !zip(uplinks, uplinks.dropFirst()).allSatisfy({ $0.t <= $1.t }) { uplinks.sort { $0.t < $1.t } }
         if !zip(datalink, datalink.dropFirst()).allSatisfy({ $0.t <= $1.t }) { datalink.sort { $0.t < $1.t } }
         if !zip(positions, positions.dropFirst()).allSatisfy({ $0.t <= $1.t }) { positions.sort { $0.t < $1.t } }
+        if !zip(reported, reported.dropFirst()).allSatisfy({ $0.t <= $1.t }) { reported.sort { $0.t < $1.t } }
         for i in channels.indices
         where !zip(channels[i], channels[i].dropFirst()).allSatisfy({ $0.t <= $1.t }) {
             channels[i].sort { $0.t < $1.t }

@@ -22,6 +22,8 @@ final class Dataset {
     static let maxBridge = 7200.0
     /// Reported values are shown this long after they were received.
     static let valueTimeout = 300.0
+    /// How long an aircraft located only by datalink reports stays shown.
+    static let reportTimeout = 1800.0
 
     let id = UUID()
     let name: String
@@ -83,7 +85,9 @@ final class Dataset {
             if let last = merged.last, message.t - last.t < 1,
                last.summary == message.summary, last.text == message.text,
                last.station == message.station, last.fromAircraft == message.fromAircraft {
-                if let channel = message.channel { merged[merged.count - 1].channels.append(channel) }
+                if let channel = message.channel, !merged[merged.count - 1].channels.contains(channel) {
+                    merged[merged.count - 1].channels.append(channel)
+                }
                 continue
             }
             var first = message
@@ -96,7 +100,7 @@ final class Dataset {
     /// Where an aircraft was at time `t`, between received positions.
     func position(of id: String, at t: Double) -> LatLon? {
         guard let i = index[id] else { return nil }
-        let positions = series[i].positions
+        let positions = series[i].track
         let after = Self.upperBound(positions.count) { positions[$0].t <= t }
         guard after > 0 else { return positions.first.map { LatLon(latitude: $0.latitude, longitude: $0.longitude) } }
         let p = positions[after - 1]
@@ -134,7 +138,7 @@ final class Dataset {
                          item.datalink.first?.t, item.datalink.last?.t].compactMap { $0 }
             if let first = times.min() { start = min(start, first) }
             if let last = times.max() { end = max(end, last) }
-            for p in item.positions {
+            for p in item.track {
                 south = min(south, p.latitude); north = max(north, p.latitude)
                 west = min(west, p.longitude); east = max(east, p.longitude)
             }
@@ -163,7 +167,7 @@ final class Dataset {
     /// the path is straight and kept where it bends.
     func track(for id: String, until t: Double) -> [TrackSegment] {
         guard let i = index[id] else { return [] }
-        let positions = series[i].positions
+        let positions = series[i].track
         let count = Self.upperBound(positions.count) { positions[$0].t <= t }
         guard count > 0 else { return [] }
         func point(_ p: Position) -> TrackPoint {
@@ -379,7 +383,8 @@ final class Dataset {
     }
 
     private func entity(of item: Series, at t: Double) -> Entity? {
-        let timeout = item.kind.timeout
+        // Datalink position reports, such as ADS-C, come every 10 to 30 minutes.
+        let timeout = item.positions.isEmpty && !item.reported.isEmpty ? Self.reportTimeout : item.kind.timeout
         guard let first = item.activity.first, first <= t else { return nil }
         let heard = Self.upperBound(item.activity.count) { item.activity[$0] <= t }
         guard heard > 0 else { return nil }
@@ -387,7 +392,7 @@ final class Dataset {
 
         // A target that is silent now but whose position is known again later
         // stays on the map, moved along the bridge between both positions.
-        let positions = item.positions
+        let positions = item.track
         let after = Self.upperBound(positions.count) { positions[$0].t <= t }
         var latitude: Double?, longitude: Double?
         var bridging = false
@@ -414,7 +419,7 @@ final class Dataset {
             let samples = item.channels[c]
             guard !samples.isEmpty else { continue }
             let k = Self.upperBound(samples.count) { samples[$0].t <= t }
-            if k > 0, t - samples[k - 1].t <= Self.valueTimeout { values[c] = samples[k - 1].v }
+            if k > 0, t - samples[k - 1].t <= max(Self.valueTimeout, timeout) { values[c] = samples[k - 1].v }
         }
         // Across a gap the last reported track is stale: follow the bridge.
         if bridging || values[Channel.track.rawValue].isNaN, !derivedTrack.isNaN {
