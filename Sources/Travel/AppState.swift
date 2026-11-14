@@ -78,6 +78,14 @@ final class AppState {
     var hoveredInterrogators: [String] = [] {
         didSet { if hoveredInterrogators != oldValue { refreshInterrogators() } }
     }
+    /// The radar whose card is open, by site name.
+    var selectedRadar: String? {
+        didSet { if selectedRadar != oldValue { refreshInterrogators() } }
+    }
+    /// The open radar card's content, kept when the radar falls silent.
+    private(set) var selectedRadarMark: RadarMark?
+    /// Aircraft interrogated by the selected radar now.
+    private(set) var selectedRadarCount = 0
     private(set) var rangeStart = 0.0
     private(set) var rangeEnd = 1.0
     /// 0...1 while files are loading.
@@ -443,24 +451,6 @@ final class AppState {
     /// interrogated: two turns of the antenna, at least 15 s.
     private static func window(_ period: Double?) -> Double { max(15, 2 * (period ?? 8)) }
 
-    private static let basis = [
-        "located": "Reviewed installation",
-        "approximate": "Approximate area",
-        "historical": "Historical directory location (2014, unverified)",
-        "airport": "Airport area of the catalogue name (approximate)",
-    ]
-
-    /// How well a candidate site matches the data, in one line.
-    private static func describe(_ code: String, _ interrogator: Interrogator, _ fit: SiteFit) -> String {
-        let km = { (metres: Double) in String(format: "%.0f km", metres / 1000) }
-        var line = "\(code): \(fit.aircraft) of \(interrogator.located) located aircraft (10-minute segments), "
-            + "median \(km(fit.medianDistance)), 90% within \(km(fit.farDistance))"
-        if let period = fit.period { line += String(format: ", %.2f s rotation", period) }
-        if interrogator.fits.count > 1 { line += " (\(interrogator.fits.count) populations)" }
-        if interrogator.unexplained > 0 { line += ", \(interrogator.unexplained) beyond 460 km of every candidate" }
-        return line + (fit.consistent ? "" : " (weak: likely another radar using the code)")
-    }
-
     private func refreshInterrogators() {
         guard let dataset else {
             if !radarMarks.isEmpty { radarMarks = [] }
@@ -486,11 +476,14 @@ final class AppState {
                 let period = rotation.map { max(1, $0.rounded()) }
                 var mark = bySite[name] ?? RadarMark(
                     codes: [], name: name, position: fit.site.position, period: nil, blinking: false,
-                    details: [Self.basis[fit.site.basis] ?? fit.site.basis]
+                    basis: fit.site.basis, selected: name == selectedRadar
                 )
                 mark.codes.append(code)
                 if !fit.consistent { mark.doubtful.insert(code) }
-                mark.details.append(Self.describe(code, interrogator, fit))
+                mark.fits.append(RadarCodeFit(
+                    code: code, period: rotation, aircraft: fit.aircraft, located: interrogator.located,
+                    medianDistance: fit.medianDistance, consistent: fit.consistent
+                ))
                 if blinking, !mark.blinking || mark.period == nil {
                     mark.blinking = true
                     mark.period = period
@@ -502,11 +495,23 @@ final class AppState {
         }
         let marks = bySite.values.sorted { $0.name < $1.name }
         if marks != radarMarks { radarMarks = marks }
-        var lit = Set<String>()
-        for code in hoveredInterrogators {
-            lit.formUnion(dataset.interrogated(by: code, from: now - Self.window(interrogators[code]?.period), to: now))
+        func lit(_ codes: [String]) -> Set<String> {
+            codes.reduce(into: Set<String>()) { result, code in
+                result.formUnion(dataset.interrogated(by: code, from: now - Self.window(interrogators[code]?.period), to: now))
+            }
         }
-        if lit != highlighted { highlighted = lit }
+        // The card stays open when its radar falls silent, marked as such.
+        var card = selectedRadar.flatMap { name in marks.first { $0.id == name } }
+        if card == nil, var previous = selectedRadarMark, previous.id == selectedRadar {
+            previous.heard = false
+            previous.blinking = false
+            card = previous
+        }
+        if card != selectedRadarMark { selectedRadarMark = card }
+        let selectedLit = lit(card?.heard == true ? card!.codes : [])
+        if selectedLit.count != selectedRadarCount { selectedRadarCount = selectedLit.count }
+        let all = lit(hoveredInterrogators).union(selectedLit)
+        if all != highlighted { highlighted = all }
     }
 
     private func refreshTrack() {

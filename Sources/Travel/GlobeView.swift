@@ -256,6 +256,7 @@ struct GlobeView: NSViewRepresentable {
     var zoomRequest = 0
     var onSelect: (String) -> Void
     var onHoverRadar: ([String]) -> Void = { _ in }
+    var onSelectRadar: (String) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -279,6 +280,7 @@ struct GlobeView: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.onSelect = onSelect
         coordinator.onHoverRadar = onHoverRadar
+        coordinator.onSelectRadar = onSelectRadar
         if coordinator.style != style {
             coordinator.style = style
             coordinator.applyStyle(to: map)
@@ -307,6 +309,7 @@ struct GlobeView: NSViewRepresentable {
 
         var onSelect: (String) -> Void = { _ in }
         var onHoverRadar: ([String]) -> Void = { _ in }
+        var onSelectRadar: (String) -> Void = { _ in }
         var style: GlobeStyle?
 
         private var annotations: [String: TargetAnnotation] = [:]
@@ -505,9 +508,9 @@ struct GlobeView: NSViewRepresentable {
             }
             var added: [RadarAnnotation] = []
             for mark in radars {
-                if let annotation = radarAnnotations[mark.id], annotation.mark.label == mark.label {
+                if let annotation = radarAnnotations[mark.id],
+                   annotation.mark.label == mark.label, annotation.mark.selected == mark.selected {
                     annotation.mark = mark
-                    map.view(for: annotation)?.toolTip = Self.radarTip(mark)
                     (map.view(for: annotation) as? RadarView)?.blink(every: mark.blinking ? mark.period ?? 4 : nil)
                 } else {
                     // New, or its codes changed: the badge is redrawn.
@@ -521,7 +524,7 @@ struct GlobeView: NSViewRepresentable {
         }
 
         /// A teal badge with a radar glyph and the interrogator code beside it.
-        private static func radarImage(_ code: String) -> NSImage {
+        private static func radarImage(_ code: String, selected: Bool) -> NSImage {
             let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .bold)
             let text = NSAttributedString(string: code, attributes: [
                 .font: font, .foregroundColor: NSColor.white,
@@ -536,8 +539,11 @@ struct GlobeView: NSViewRepresentable {
                 let circle = NSRect(x: 0, y: 0, width: badge, height: badge).insetBy(dx: 1, dy: 1)
                 Self.radarColor.setFill()
                 NSBezierPath(ovalIn: circle).fill()
-                NSColor.black.withAlphaComponent(0.5).setStroke()
-                NSBezierPath(ovalIn: circle).stroke()
+                // The selected radar gets a white ring.
+                let ring = NSBezierPath(ovalIn: circle.insetBy(dx: selected ? 0.75 : 0, dy: selected ? 0.75 : 0))
+                ring.lineWidth = selected ? 2 : 1
+                (selected ? NSColor.white : NSColor.black.withAlphaComponent(0.5)).setStroke()
+                ring.stroke()
                 if let glyph {
                     glyph.draw(in: NSRect(x: circle.midX - glyph.size.width / 2, y: circle.midY - glyph.size.height / 2,
                                           width: glyph.size.width, height: glyph.size.height))
@@ -549,12 +555,6 @@ struct GlobeView: NSViewRepresentable {
 
         static let radarColor = NSColor.systemTeal
 
-        private static func radarTip(_ mark: RadarMark) -> String {
-            let period = mark.period.map { String(format: " · %.0f s", $0) } ?? ""
-            return (["\(mark.label) · \(mark.name)\(period)"] + mark.details
-                + ["Candidate site from the uplink1030 catalogue, checked against the aircraft each code addresses"])
-                .joined(separator: "\n")
-        }
 
         /// A small antenna badge with the station's code beside it.
         private static func stationImage(_ code: String) -> NSImage {
@@ -777,7 +777,7 @@ struct GlobeView: NSViewRepresentable {
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if let radar = annotation as? RadarAnnotation {
                 let view = RadarView(annotation: radar, reuseIdentifier: nil)
-                let image = Self.radarImage(radar.mark.label)
+                let image = Self.radarImage(radar.mark.label, selected: radar.mark.selected)
                 view.image = image
                 // Weak candidates are drawn faded.
                 view.alphaValue = radar.mark.isDoubtful ? 0.55 : 1
@@ -785,7 +785,6 @@ struct GlobeView: NSViewRepresentable {
                 // Few and meaningful: never hidden behind aircraft.
                 view.displayPriority = .required
                 view.zPriority = .min
-                view.toolTip = Self.radarTip(radar.mark)
                 view.onHover = { [weak self] codes in self?.onHoverRadar(codes) }
                 view.blink(every: radar.mark.blinking ? radar.mark.period ?? 4 : nil)
                 return view
@@ -850,6 +849,11 @@ struct GlobeView: NSViewRepresentable {
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             if let mark = view.annotation as? MarkAnnotation {
                 mapView.deselectAnnotation(mark, animated: false)
+                return
+            }
+            if let radar = view.annotation as? RadarAnnotation {
+                mapView.deselectAnnotation(radar, animated: false)
+                onSelectRadar(radar.mark.id)
                 return
             }
             guard let annotation = view.annotation as? TargetAnnotation else { return }

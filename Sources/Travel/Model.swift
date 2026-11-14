@@ -90,13 +90,30 @@ struct RadarMark: Sendable, Equatable, Identifiable {
     var period: Double?
     /// Interrogating the selected aircraft now.
     var blinking: Bool
-    /// The basis of the site, then how each code fits the data.
-    var details: [String] = []
+    /// How the site is known: located, approximate, historical or airport.
+    var basis = ""
+    /// How each code fits the data at this site.
+    var fits: [RadarCodeFit] = []
     /// Codes whose fit to this site is weak, written with a question mark.
     var doubtful: Set<String> = []
+    /// Chosen by a click: its card is open and its aircraft stay coloured.
+    var selected = false
+    /// False when kept on screen for its card although no longer heard.
+    var heard = true
     var id: String { name }
     var label: String { codes.map { doubtful.contains($0) ? $0 + "?" : $0 }.joined(separator: " · ") }
     var isDoubtful: Bool { !codes.isEmpty && codes.allSatisfy(doubtful.contains) }
+}
+
+/// One interrogator code at a candidate site, for the radar card.
+struct RadarCodeFit: Sendable, Equatable {
+    var code: String
+    var period: Double?
+    /// Aircraft (10-minute segments) supporting the site, out of those located.
+    var aircraft: Int
+    var located: Int
+    var medianDistance: Double
+    var consistent: Bool
 }
 
 /// A ground station announcing itself: an ACARS squitter (label SQ), or the
