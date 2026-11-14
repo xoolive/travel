@@ -58,18 +58,58 @@ struct TrackSegment: Sendable, Equatable {
     var mark: Mark?
 }
 
+/// An all-call reply heard from an aircraft, naming the interrogator it answers.
+struct InterrogatorReply: Sendable, Equatable {
+    var t: Double
+    var code: String
+}
+
 /// An event placed on the selected aircraft's track.
 struct TrackMark: Sendable, Equatable, Identifiable {
     enum Kind: Sendable, Equatable {
         case datalinkUp
         case datalinkDown
         case resolution
+        case groundStation
     }
 
     var id: String
     var kind: Kind
     var position: LatLon
     var label: String
+    /// The other end of a datalink message: its ground station, when known.
+    var link: LatLon?
+}
+
+/// Interrogators placed at one candidate site; codes sharing a site share a badge.
+struct RadarMark: Sendable, Equatable, Identifiable {
+    var codes: [String]
+    var name: String
+    var position: LatLon
+    /// Rotation period rounded to the second, of the code that blinks, when known.
+    var period: Double?
+    /// Interrogating the selected aircraft now.
+    var blinking: Bool
+    /// The basis of the site, then how each code fits the data.
+    var details: [String] = []
+    /// Codes whose fit to this site is weak, written with a question mark.
+    var doubtful: Set<String> = []
+    var id: String { name }
+    var label: String { codes.map { doubtful.contains($0) ? $0 + "?" : $0 }.joined(separator: " · ") }
+    var isDoubtful: Bool { !codes.isEmpty && codes.allSatisfy(doubtful.contains) }
+}
+
+/// A ground station announcing itself: an ACARS squitter (label SQ), or the
+/// coordinates in a VDL2 `station_name`.
+struct StationReport: Sendable, Equatable {
+    var t: Double
+    /// Provider and station code (`ARINC AMSN`), or the station address.
+    var key: String
+    /// What to print next to it: the airport, or the station code.
+    var code: String
+    var position: LatLon
+    /// Provider, link and frequency, in a few words.
+    var details: String
 }
 
 /// Slow-changing text attributes; the latest value wins.
@@ -154,6 +194,7 @@ struct DatalinkMessage: Sendable, Equatable {
     var station: String?
     /// Where the ground station is, when the decoder knows it.
     var stationName: String?
+    var stationPosition: LatLon?
     /// The aircraft sent it (true) or received it (false).
     var fromAircraft: Bool
     /// What the frame carries, in a few words.
@@ -176,9 +217,17 @@ struct Series: Sendable {
     /// Interrogations received for this aircraft, from an uplink file.
     var uplinks: [Uplink] = []
     var datalink: [DatalinkMessage] = []
+    /// All-call replies (DF 11) and the interrogator code they answer.
+    var replies: [InterrogatorReply] = []
     /// Coarse positions reported along with datalink messages (Airframes.io
     /// flight tracking, about 0.1°), kept apart from received positions.
     var reported: [Position] = []
+    /// Ground stations heard, on the series `Series.groundStations` only.
+    var stations: [StationReport] = []
+
+    /// Ground station reports travel from the builders to the dataset in a
+    /// series of their own, under this identifier.
+    static let groundStations = "#ground-stations"
 
     /// Received positions, or the reported ones for an aircraft only heard
     /// on datalink.
@@ -187,7 +236,9 @@ struct Series: Sendable {
     mutating func append(_ other: Series) {
         uplinks.append(contentsOf: other.uplinks)
         datalink.append(contentsOf: other.datalink)
+        replies.append(contentsOf: other.replies)
         reported.append(contentsOf: other.reported)
+        stations.append(contentsOf: other.stations)
         name = other.name ?? name
         info.merge(other.info)
         activity.append(contentsOf: other.activity)
@@ -200,6 +251,7 @@ struct Series: Sendable {
         if !zip(activity, activity.dropFirst()).allSatisfy({ $0 <= $1 }) { activity.sort() }
         if !zip(uplinks, uplinks.dropFirst()).allSatisfy({ $0.t <= $1.t }) { uplinks.sort { $0.t < $1.t } }
         if !zip(datalink, datalink.dropFirst()).allSatisfy({ $0.t <= $1.t }) { datalink.sort { $0.t < $1.t } }
+        if !zip(replies, replies.dropFirst()).allSatisfy({ $0.t <= $1.t }) { replies.sort { $0.t < $1.t } }
         if !zip(positions, positions.dropFirst()).allSatisfy({ $0.t <= $1.t }) { positions.sort { $0.t < $1.t } }
         if !zip(reported, reported.dropFirst()).allSatisfy({ $0.t <= $1.t }) { reported.sort { $0.t < $1.t } }
         for i in channels.indices

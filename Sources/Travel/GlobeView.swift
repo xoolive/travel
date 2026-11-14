@@ -36,6 +36,8 @@ final class TargetAnnotation: NSObject, MKAnnotation {
     var symbol: Int
     /// Shown when the pointer is over the icon.
     var summary: HoverCard.Content
+    /// Interrogated by the interrogator under the pointer.
+    var highlighted = false
     var iconKey = -1
 
     init(
@@ -74,6 +76,51 @@ final class TargetView: MKAnnotationView {
 
     override func mouseExited(with event: NSEvent) {
         onHover(nil)
+    }
+}
+
+/// An interrogator at its candidate site.
+final class RadarAnnotation: NSObject, MKAnnotation {
+    var mark: RadarMark
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: mark.position.latitude, longitude: mark.position.longitude)
+    }
+
+    init(_ mark: RadarMark) { self.mark = mark }
+}
+
+/// A radar badge that reports hovering and can blink with its antenna.
+final class RadarView: MKAnnotationView {
+    var onHover: ([String]) -> Void = { _ in }
+    private var area: NSTrackingArea?
+    private var blinkPeriod: Double?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area { removeTrackingArea(area) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        self.area = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHover((annotation as? RadarAnnotation)?.mark.codes ?? []) }
+    override func mouseExited(with event: NSEvent) { onHover([]) }
+
+    /// Fades out and back once per rotation of the antenna.
+    func blink(every period: Double?) {
+        guard period != blinkPeriod else { return }
+        blinkPeriod = period
+        wantsLayer = true
+        layer?.removeAnimation(forKey: "blink")
+        guard let period else { return }
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 1
+        animation.toValue = 0.15
+        animation.duration = period / 2
+        animation.autoreverses = true
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer?.add(animation, forKey: "blink")
     }
 }
 
@@ -200,11 +247,15 @@ struct GlobeView: NSViewRepresentable {
     var selectedID: String?
     var track: [TrackSegment]
     var marks: [TrackMark] = []
+    var radars: [RadarMark] = []
+    /// Aircraft drawn in the highlight colour.
+    var highlighted: Set<String> = []
     var style: GlobeStyle
     var focus: MapFocus?
     /// Incremented to frame the data closely.
     var zoomRequest = 0
     var onSelect: (String) -> Void
+    var onHoverRadar: ([String]) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -227,15 +278,17 @@ struct GlobeView: NSViewRepresentable {
     func updateNSView(_ map: MKMapView, context: Context) {
         let coordinator = context.coordinator
         coordinator.onSelect = onSelect
+        coordinator.onHoverRadar = onHoverRadar
         if coordinator.style != style {
             coordinator.style = style
             coordinator.applyStyle(to: map)
         }
         coordinator.syncFocus(focus, zoomRequest: zoomRequest, on: map)
-        coordinator.syncTargets(entities, on: map)
+        coordinator.syncTargets(entities, highlighted: highlighted, on: map)
         coordinator.syncSelection(selectedID, on: map)
         coordinator.syncTrack(track, on: map)
         coordinator.syncMarks(marks, on: map)
+        coordinator.syncRadars(radars, on: map)
         coordinator.refreshIcons(on: map)
     }
 
@@ -253,6 +306,7 @@ struct GlobeView: NSViewRepresentable {
         private static let sizes: [CGFloat] = [0.72, 0.8, 0.9, 1.0, 1.12, 1.26, 1.42]
 
         var onSelect: (String) -> Void = { _ in }
+        var onHoverRadar: ([String]) -> Void = { _ in }
         var style: GlobeStyle?
 
         private var annotations: [String: TargetAnnotation] = [:]
@@ -304,7 +358,7 @@ struct GlobeView: NSViewRepresentable {
             map.setCamera(camera, animated: true)
         }
 
-        func syncTargets(_ entities: [Entity], on map: MKMapView) {
+        func syncTargets(_ entities: [Entity], highlighted: Set<String>, on map: MKMapView) {
             var seen = Set<String>()
             var added: [TargetAnnotation] = []
             for entity in entities {
@@ -330,11 +384,13 @@ struct GlobeView: NSViewRepresentable {
                     annotation.track = entity[.track]
                     annotation.symbol = symbol
                     annotation.summary = summary
+                    annotation.highlighted = highlighted.contains(entity.id)
                 } else {
                     let annotation = TargetAnnotation(
                         id: entity.id, kind: entity.kind, coordinate: coordinate,
                         track: entity[.track], symbol: symbol, summary: summary
                     )
+                    annotation.highlighted = highlighted.contains(entity.id)
                     annotations[entity.id] = annotation
                     added.append(annotation)
                 }
@@ -407,17 +463,124 @@ struct GlobeView: NSViewRepresentable {
         }
 
         private var markAnnotations: [String: MarkAnnotation] = [:]
+        /// Dashed lines from datalink envelopes to their ground station.
+        private var markLinks: [String: MKPolyline] = [:]
+        private static let downlinkTitle = "link-down"
+        private static let uplinkTitle = "link-up"
 
         func syncMarks(_ marks: [TrackMark], on map: MKMapView) {
             let wanted = Dictionary(uniqueKeysWithValues: marks.map { ($0.id, $0) })
             let stale = markAnnotations.filter { wanted[$0.key] != $0.value.mark }
             if !stale.isEmpty {
                 map.removeAnnotations(Array(stale.values))
+                let lines = stale.keys.compactMap { markLinks.removeValue(forKey: $0) }
+                if !lines.isEmpty { map.removeOverlays(lines) }
                 for id in stale.keys { markAnnotations[id] = nil }
             }
             let added = marks.filter { markAnnotations[$0.id] == nil }.map(MarkAnnotation.init)
             for annotation in added { markAnnotations[annotation.mark.id] = annotation }
             if !added.isEmpty { map.addAnnotations(added) }
+            var lines: [MKPolyline] = []
+            for annotation in added {
+                guard let link = annotation.mark.link else { continue }
+                let ends = [annotation.coordinate, CLLocationCoordinate2D(latitude: link.latitude, longitude: link.longitude)]
+                let line = MKGeodesicPolyline(coordinates: ends, count: 2)
+                line.title = annotation.mark.kind == .datalinkUp ? Self.uplinkTitle : Self.downlinkTitle
+                markLinks[annotation.mark.id] = line
+                lines.append(line)
+            }
+            if !lines.isEmpty { map.addOverlays(lines, level: .aboveLabels) }
+        }
+
+        // MARK: Radars
+
+        private var radarAnnotations: [String: RadarAnnotation] = [:]
+
+        func syncRadars(_ radars: [RadarMark], on map: MKMapView) {
+            let wanted = Dictionary(uniqueKeysWithValues: radars.map { ($0.id, $0) })
+            let gone = radarAnnotations.filter { wanted[$0.key] == nil }
+            if !gone.isEmpty {
+                map.removeAnnotations(Array(gone.values))
+                for code in gone.keys { radarAnnotations[code] = nil }
+            }
+            var added: [RadarAnnotation] = []
+            for mark in radars {
+                if let annotation = radarAnnotations[mark.id], annotation.mark.label == mark.label {
+                    annotation.mark = mark
+                    map.view(for: annotation)?.toolTip = Self.radarTip(mark)
+                    (map.view(for: annotation) as? RadarView)?.blink(every: mark.blinking ? mark.period ?? 4 : nil)
+                } else {
+                    // New, or its codes changed: the badge is redrawn.
+                    if let old = radarAnnotations[mark.id] { map.removeAnnotation(old) }
+                    let annotation = RadarAnnotation(mark)
+                    radarAnnotations[mark.id] = annotation
+                    added.append(annotation)
+                }
+            }
+            if !added.isEmpty { map.addAnnotations(added) }
+        }
+
+        /// A teal badge with a radar glyph and the interrogator code beside it.
+        private static func radarImage(_ code: String) -> NSImage {
+            let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .bold)
+            let text = NSAttributedString(string: code, attributes: [
+                .font: font, .foregroundColor: NSColor.white,
+                .strokeColor: NSColor.black.withAlphaComponent(0.7), .strokeWidth: -3.0,
+            ])
+            let badge: CGFloat = 18
+            let width = badge + 2 + ceil(text.size().width)
+            let glyph = NSImage(systemSymbolName: "dot.radiowaves.left.and.right", accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+                    .applying(NSImage.SymbolConfiguration(paletteColors: [.white])))
+            return NSImage(size: NSSize(width: width, height: badge), flipped: false) { rect in
+                let circle = NSRect(x: 0, y: 0, width: badge, height: badge).insetBy(dx: 1, dy: 1)
+                Self.radarColor.setFill()
+                NSBezierPath(ovalIn: circle).fill()
+                NSColor.black.withAlphaComponent(0.5).setStroke()
+                NSBezierPath(ovalIn: circle).stroke()
+                if let glyph {
+                    glyph.draw(in: NSRect(x: circle.midX - glyph.size.width / 2, y: circle.midY - glyph.size.height / 2,
+                                          width: glyph.size.width, height: glyph.size.height))
+                }
+                text.draw(at: NSPoint(x: badge + 2, y: (rect.height - text.size().height) / 2))
+                return true
+            }
+        }
+
+        static let radarColor = NSColor.systemTeal
+
+        private static func radarTip(_ mark: RadarMark) -> String {
+            let period = mark.period.map { String(format: " · %.0f s", $0) } ?? ""
+            return (["\(mark.label) · \(mark.name)\(period)"] + mark.details
+                + ["Candidate site from the uplink1030 catalogue, checked against the aircraft each code addresses"])
+                .joined(separator: "\n")
+        }
+
+        /// A small antenna badge with the station's code beside it.
+        private static func stationImage(_ code: String) -> NSImage {
+            let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .semibold)
+            let text = NSAttributedString(string: code, attributes: [
+                .font: font, .foregroundColor: NSColor.white,
+                .strokeColor: NSColor.black.withAlphaComponent(0.7), .strokeWidth: -3.0,
+            ])
+            let badge: CGFloat = 16
+            let width = badge + 3 + ceil(text.size().width)
+            let glyph = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .bold)
+                    .applying(NSImage.SymbolConfiguration(paletteColors: [.white])))
+            return NSImage(size: NSSize(width: width, height: badge), flipped: false) { rect in
+                let circle = NSRect(x: 0, y: 0, width: badge, height: badge).insetBy(dx: 1, dy: 1)
+                NSColor.systemGray.setFill()
+                NSBezierPath(ovalIn: circle).fill()
+                NSColor.black.withAlphaComponent(0.5).setStroke()
+                NSBezierPath(ovalIn: circle).stroke()
+                if let glyph {
+                    glyph.draw(in: NSRect(x: circle.midX - glyph.size.width / 2, y: circle.midY - glyph.size.height / 2,
+                                          width: glyph.size.width, height: glyph.size.height))
+                }
+                text.draw(at: NSPoint(x: badge + 2, y: (rect.height - text.size().height) / 2))
+                return true
+            }
         }
 
         private static func markImage(_ kind: TrackMark.Kind) -> NSImage {
@@ -425,6 +588,7 @@ struct GlobeView: NSViewRepresentable {
             case .datalinkDown: .systemOrange
             case .datalinkUp: .systemCyan
             case .resolution: .systemRed
+            case .groundStation: .systemGray
             }
             let symbol = kind == .resolution ? "exclamationmark.triangle.fill" : "envelope.fill"
             let configuration = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
@@ -487,8 +651,9 @@ struct GlobeView: NSViewRepresentable {
                 bucket = Int(((degrees.truncatingRemainder(dividingBy: 360) + 360) / Self.step).rounded()) % (Self.buckets - 1)
             }
             let selected = annotation.id == selectedID ? 1 : 0
+            let lit = annotation.highlighted ? 1 : 0
             let kind = annotation.kind == .ship ? 1 : 0
-            let style = (bucket * 2 + selected) * 2 + kind
+            let style = ((bucket * 2 + selected) * 2 + lit) * 2 + kind
             return (style * AircraftIcons.capacity + annotation.symbol) * Self.sizes.count + size
         }
 
@@ -498,13 +663,16 @@ struct GlobeView: NSViewRepresentable {
             let symbol = (key / Self.sizes.count) % AircraftIcons.capacity
             let style = key / Self.sizes.count / AircraftIcons.capacity
             let isShip = style % 2 == 1
-            let selected = (style / 2) % 2 == 1
-            let bucket = style / 4
+            let lit = (style / 2) % 2 == 1
+            let selected = (style / 4) % 2 == 1
+            let bucket = style / 8
             let hasDirection = bucket < Self.buckets - 1
             let angle = Double(bucket) * Self.step * .pi / 180
             // The box of a sprite, of which the silhouette fills about two thirds.
             let side = (38 * size * (selected ? 1.2 : 1)).rounded()
-            let fill = selected ? Self.selectedColor : (isShip ? Self.shipColor : Self.aircraftColor)
+            let fill = selected ? Self.selectedColor
+                : lit ? Self.radarColor.cgColor
+                : (isShip ? Self.shipColor : Self.aircraftColor)
 
             // Drawn into a plain bitmap, independent of the view it ends up in.
             let pixels = Int((side * Self.bitmapScale).rounded())
@@ -607,11 +775,35 @@ struct GlobeView: NSViewRepresentable {
         // MARK: MKMapViewDelegate
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if let radar = annotation as? RadarAnnotation {
+                let view = RadarView(annotation: radar, reuseIdentifier: nil)
+                let image = Self.radarImage(radar.mark.label)
+                view.image = image
+                // Weak candidates are drawn faded.
+                view.alphaValue = radar.mark.isDoubtful ? 0.55 : 1
+                view.centerOffset = CGPoint(x: (image.size.width - 18) / 2, y: 0)
+                // Few and meaningful: never hidden behind aircraft.
+                view.displayPriority = .required
+                view.zPriority = .min
+                view.toolTip = Self.radarTip(radar.mark)
+                view.onHover = { [weak self] codes in self?.onHoverRadar(codes) }
+                view.blink(every: radar.mark.blinking ? radar.mark.period ?? 4 : nil)
+                return view
+            }
             if let mark = annotation as? MarkAnnotation {
                 let view = MKAnnotationView(annotation: mark, reuseIdentifier: nil)
-                view.image = Self.markImage(mark.mark.kind)
+                if mark.mark.kind == .groundStation {
+                    let image = Self.stationImage(mark.mark.label.components(separatedBy: "\n")[0])
+                    view.image = image
+                    // The badge, not the middle of the label, sits on the station.
+                    view.centerOffset = CGPoint(x: (image.size.width - 16) / 2, y: 0)
+                    // Stations give way to aircraft and to each other when crowded.
+                    view.displayPriority = .defaultHigh
+                } else {
+                    view.image = Self.markImage(mark.mark.kind)
+                    view.displayPriority = .required
+                }
                 view.toolTip = mark.mark.label
-                view.displayPriority = .required
                 view.zPriority = .min
                 return view
             }
@@ -634,6 +826,12 @@ struct GlobeView: NSViewRepresentable {
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             guard let line = overlay as? MKPolyline else { return MKOverlayRenderer(overlay: overlay) }
             let renderer = MKPolylineRenderer(polyline: line)
+            if line.title == Self.downlinkTitle || line.title == Self.uplinkTitle {
+                renderer.strokeColor = (line.title == Self.downlinkTitle ? NSColor.systemOrange : .systemCyan).withAlphaComponent(0.85)
+                renderer.lineWidth = 1.2
+                renderer.lineDashPattern = [4, 4]
+                return renderer
+            }
             renderer.strokeColor = .systemYellow
             renderer.lineWidth = 3
             if line.title == Self.gapTitle {

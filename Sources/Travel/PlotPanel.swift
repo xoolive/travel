@@ -309,7 +309,12 @@ private struct InterrogationChart: View {
                 }
             }
             .chartOverlay { proxy in
-                Playhead(state: state, proxy: proxy)
+                // Hovering an interrogator's row colours the aircraft it interrogates.
+                Playhead(state: state, proxy: proxy) { row in
+                    let code = row.flatMap { $0.hasPrefix("II") || $0.hasPrefix("SI") ? $0 : nil }
+                    let codes = code.map { [$0] } ?? []
+                    if state.hoveredInterrogators != codes { state.hoveredInterrogators = codes }
+                }
             }
             .frame(height: CGFloat(rows.count) * 16 + 40)
         }
@@ -409,6 +414,8 @@ private struct DatalinkList: View {
 private struct Playhead: View {
     let state: AppState
     let proxy: ChartProxy
+    /// Called with the category under the pointer, for charts with rows.
+    var onHoverRow: ((String?) -> Void)?
 
     var body: some View {
         GeometryReader { geometry in
@@ -425,6 +432,13 @@ private struct Playhead: View {
                             }
                         }
                     )
+                    .onContinuousHover { phase in
+                        guard let onHoverRow else { return }
+                        switch phase {
+                        case let .active(location): onHoverRow(proxy.value(atY: location.y - frame.minY, as: String.self))
+                        case .ended: onHoverRow(nil)
+                        }
+                    }
                 if let x, x >= 0, x <= frame.width {
                     Rectangle()
                         .fill(.white.opacity(0.7))

@@ -1,0 +1,122 @@
+"""Builds Resources/radars.csv, the candidate sites per interrogator code.
+
+Sources, all from the uplink1030 repository (path as first argument,
+default ~/Documents/code/uplink1030):
+
+- analysis/20261013/output/csv/french_ssr_sites.csv: curated French sites,
+  reviewed on satellite imagery ("located");
+- analysis/20261013/output/csv/radar_site_candidates.csv: approximate areas
+  for codes without a reviewed site ("approximate");
+- radar1090.txt (code, country, name; commented lines included, as in the
+  report) joined by country and name with
+  analysis/20261013/output/json/worldwide_radar_locations.geojson, an
+  unverified historical directory from 2014 ("historical");
+- failing that, the airport of the same name and country in jet1090's
+  airports.json (Resources/airports.json), as the report placed catalogue
+  names at their airport area ("airport").
+
+Codes are reused and the assignments are undated: these are candidates,
+which travel checks against the aircraft each code actually addresses.
+"""
+
+import csv
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+repo = Path(sys.argv[1] if len(sys.argv) > 1 else "~/Documents/code/uplink1030").expanduser()
+out = Path(__file__).resolve().parent.parent / "Resources" / "radars.csv"
+output = repo / "analysis/20261013/output"
+
+countries = {
+    "AT": "Austria", "BE": "Belgium", "DE": "Germany", "DK": "Denmark", "EE": "Estonia",
+    "EG": "Egypt", "ES": "Spain", "FR": "France", "GB": "United Kingdom", "GR": "Greece",
+    "HR": "Croatia", "HU": "Hungary", "IE": "Ireland", "LT": "Lithuania", "LU": "Luxembourg",
+    "LV": "Latvia", "MA": "Morocco", "NL": "Netherlands", "NO": "Norway", "PL": "Poland",
+    "PT": "Portugal", "RS": "Serbia", "SI": "Slovenia", "SK": "Slovakia", "TN": "Tunisia",
+    "TR": "Turkey", "RO": "Romania", "GE": "Georgia", "AZ": "Azerbaijan", "KZ": "Kazakhstan",
+    "UZ": "Uzbekistan", "TM": "Turkmenistan", "CH": "Switzerland", "IT": "Italy", "BG": "Bulgaria",
+    "CZ": "Czech Republic", "UA": "Ukraine", "CY": "Cyprus", "SA": "Saudi Arabia", "OM": "Oman",
+    "JO": "Jordan", "IS": "Iceland", "FI": "Finland", "SE": "Sweden", "AL": "Albania",
+}
+
+
+def key(name: str) -> str:
+    """First word, lower case, without accents, digits or a trailing roman one."""
+    text = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    words = re.findall(r"[a-z]+", text)
+    if not words:
+        return ""
+    word = words[0]
+    if len(word) > 5 and name.split()[0].endswith("I") and word.endswith("i"):
+        word = word[:-1]  # "ParacuellosI", "MalagaI"
+    return word
+
+
+rows = []
+
+for r in csv.DictReader(open(output / "csv/french_ssr_sites.csv")):
+    if r["located"] == "True" and r["codes"]:
+        for code in r["codes"].split(","):
+            rows.append((code.strip(), r["display_name"], float(r["latitude"]), float(r["longitude"]), "located"))
+
+for r in csv.DictReader(open(output / "csv/radar_site_candidates.csv")):
+    lat, lon = float(r["latitude"]), float(r["longitude"])
+    if any(c == r["code"] and abs(a - lat) < 0.3 and abs(o - lon) < 0.3 for c, _, a, o, _ in rows):
+        continue
+    rows.append((r["code"], r["name"], lat, lon, "approximate"))
+
+features = json.load(open(output / "json/worldwide_radar_locations.geojson"))["features"]
+places: dict[tuple[str, str], tuple[str, float, float]] = {}
+for feature in features:
+    p = feature["properties"]
+    if p.get("country") and p.get("latitude") is not None:
+        places.setdefault((p["country"], key(p["name"])), (p["name"], p["latitude"], p["longitude"]))
+
+airports: dict[tuple[str, str], tuple[float, float]] = {}
+for airport in json.load(open(out.parent / "airports.json")):
+    airports.setdefault((airport["country"], key(airport["name"])), (airport["lat"], airport["lon"]))
+
+joined = from_airports = unmatched = 0
+for line in open(repo / "radar1090.txt", encoding="latin-1"):
+    match = re.match(r"^;?((?:II|SI)\d+)\s+([A-Z]{2})\s+(.+?)\s*$", line)
+    if not match:
+        continue
+    code, iso, name = match.groups()
+    if "example" in name:
+        continue  # the file's own header line
+    country = countries.get(iso)
+    word = key(name)
+    if not country or len(word) < 4:
+        continue
+    place = places.get((country, word))
+    basis = "historical"
+    if place:
+        _, lat, lon = place
+    elif (country, word) in airports:
+        lat, lon = airports[(country, word)]
+        basis = "airport"
+    else:
+        unmatched += 1
+        continue
+    # A curated site of the same code nearby takes precedence.
+    if any(c == code and abs(a - lat) < 0.3 and abs(o - lon) < 0.3 for c, _, a, o, _ in rows):
+        continue
+    rows.append((code, f"{name} ({iso})", lat, lon, basis))
+    if basis == "airport":
+        from_airports += 1
+    else:
+        joined += 1
+
+rows.sort()
+with open(out, "w", newline="") as f:
+    f.write("# Interrogator candidate sites, generated by scripts/make-radars.py from the uplink1030\n")
+    f.write("# radar catalogue. Codes are reused across Europe and assignments are undated:\n")
+    f.write("# candidates, checked by travel against the aircraft each code addresses.\n")
+    writer = csv.writer(f)
+    writer.writerow(["code", "name", "latitude", "longitude", "basis"])
+    writer.writerows(rows)
+print(f"{len(rows)} sites: {joined} from the historical directory, {from_airports} at airports; "
+      f"{unmatched} catalogue entries without coordinates")

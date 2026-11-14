@@ -68,6 +68,16 @@ final class AppState {
     private(set) var selectedTrack: [TrackSegment] = []
     /// Datalink and TCAS events of the selected aircraft, up to now.
     private(set) var selectedMarks: [TrackMark] = []
+    /// Ground stations heard so far.
+    private(set) var stationMarks: [TrackMark] = []
+    /// Interrogators heard recently, at their candidate site.
+    private(set) var radarMarks: [RadarMark] = []
+    /// Aircraft interrogated by the hovered interrogator.
+    private(set) var highlighted: Set<String> = []
+    /// The interrogators under the pointer, on the map or in the chart.
+    var hoveredInterrogators: [String] = [] {
+        didSet { if hoveredInterrogators != oldValue { refreshInterrogators() } }
+    }
     private(set) var rangeStart = 0.0
     private(set) var rangeEnd = 1.0
     /// 0...1 while files are loading.
@@ -75,7 +85,12 @@ final class AppState {
     var loadError: String?
 
     var selectedID: String? {
-        didSet { if oldValue != selectedID { refreshTrack() } }
+        didSet {
+            if oldValue != selectedID {
+                refreshTrack()
+                refreshInterrogators()
+            }
+        }
     }
 
     /// Displayed instant, seconds since 1970.
@@ -417,6 +432,81 @@ final class AppState {
         guard let dataset else { return }
         entities = dataset.entities(at: currentTime)
         refreshTrack()
+        let stations = dataset.groundStations(until: currentTime).map {
+            TrackMark(id: "g" + $0.key, kind: .groundStation, position: $0.position, label: "\($0.code)\n\($0.details)")
+        }
+        if stations != stationMarks { stationMarks = stations }
+        refreshInterrogators()
+    }
+
+    /// How long after its last interrogation an aircraft counts as
+    /// interrogated: two turns of the antenna, at least 15 s.
+    private static func window(_ period: Double?) -> Double { max(15, 2 * (period ?? 8)) }
+
+    private static let basis = [
+        "located": "Reviewed installation",
+        "approximate": "Approximate area",
+        "historical": "Historical directory location (2014, unverified)",
+        "airport": "Airport area of the catalogue name (approximate)",
+    ]
+
+    /// How well a candidate site matches the data, in one line.
+    private static func describe(_ code: String, _ interrogator: Interrogator, _ fit: SiteFit) -> String {
+        let km = { (metres: Double) in String(format: "%.0f km", metres / 1000) }
+        var line = "\(code): \(fit.aircraft) of \(interrogator.located) located aircraft (10-minute segments), "
+            + "median \(km(fit.medianDistance)), 90% within \(km(fit.farDistance))"
+        if let period = fit.period { line += String(format: ", %.2f s rotation", period) }
+        if interrogator.fits.count > 1 { line += " (\(interrogator.fits.count) populations)" }
+        if interrogator.unexplained > 0 { line += ", \(interrogator.unexplained) beyond 460 km of every candidate" }
+        return line + (fit.consistent ? "" : " (weak: likely another radar using the code)")
+    }
+
+    private func refreshInterrogators() {
+        guard let dataset else {
+            if !radarMarks.isEmpty { radarMarks = [] }
+            if !highlighted.isEmpty { highlighted = [] }
+            return
+        }
+        let interrogators = dataset.interrogators
+        let now = currentTime
+        let active = dataset.activeInterrogators(from: now - 120, to: now)
+        // One badge per site, listing its codes.
+        var bySite: [String: RadarMark] = [:]
+        for code in active.sorted() {
+            guard let interrogator = interrogators[code] else { continue }
+            for name in dataset.activeSites(of: code, from: now - 120, to: now).sorted() {
+                guard let fit = interrogator.fit(named: name) else { continue }
+                let rotation = fit.period ?? interrogator.period
+                let window = Self.window(rotation)
+                // Blinks when the selected aircraft belongs to this population.
+                let blinking = selectedID.map {
+                    (interrogator.site(of: $0, at: now) ?? interrogator.site(of: $0, at: now - window)) == name
+                        && dataset.interrogated(by: code, from: now - window, to: now).contains($0)
+                } ?? false
+                let period = rotation.map { max(1, $0.rounded()) }
+                var mark = bySite[name] ?? RadarMark(
+                    codes: [], name: name, position: fit.site.position, period: nil, blinking: false,
+                    details: [Self.basis[fit.site.basis] ?? fit.site.basis]
+                )
+                mark.codes.append(code)
+                if !fit.consistent { mark.doubtful.insert(code) }
+                mark.details.append(Self.describe(code, interrogator, fit))
+                if blinking, !mark.blinking || mark.period == nil {
+                    mark.blinking = true
+                    mark.period = period
+                } else if mark.period == nil {
+                    mark.period = period
+                }
+                bySite[name] = mark
+            }
+        }
+        let marks = bySite.values.sorted { $0.name < $1.name }
+        if marks != radarMarks { radarMarks = marks }
+        var lit = Set<String>()
+        for code in hoveredInterrogators {
+            lit.formUnion(dataset.interrogated(by: code, from: now - Self.window(interrogators[code]?.period), to: now))
+        }
+        if lit != highlighted { highlighted = lit }
     }
 
     private func refreshTrack() {
@@ -435,7 +525,8 @@ final class AppState {
             let when = Date(timeIntervalSince1970: message.t).formatted(time)
             marks.append(TrackMark(
                 id: "d\(n)", kind: message.fromAircraft ? .datalinkDown : .datalinkUp,
-                position: position, label: "\(when)  \(message.summary)"
+                position: position, label: "\(when)  \(message.summary)",
+                link: message.stationPosition
             ))
         }
         for (n, uplink) in dataset.uplinks(of: id).enumerated() where uplink.origin == .resolution && uplink.t <= currentTime {

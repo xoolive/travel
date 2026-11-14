@@ -47,7 +47,7 @@ struct LiveSource: Identifiable, Codable, Hashable {
 
     /// Prefilled values for a new source.
     static var template: LiveSource {
-        LiveSource(name: "Redis", address: "127.0.0.1:6379", channels: "jet1090 ship162 datalink-*")
+        LiveSource(name: "Redis", address: "127.0.0.1:6379", channels: "jet1090 ship162 datalink-* uplink1030")
     }
 
     var channelList: [String] {

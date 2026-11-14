@@ -35,7 +35,10 @@ final class Dataset {
     /// Bumped on every merge.
     private(set) var revision = 0
 
+    /// Ground stations heard, in time order.
+    private(set) var stations: [StationReport] = []
     private var index: [String: Int] = [:]
+    private var interrogatorCache: (revision: Int, at: Date, logs: [String: InterrogationLog], interrogators: [String: Interrogator])?
     private var trackCache: (id: String, revision: Int, runs: [[Position]])?
     private var turbulenceCache: (id: String, revision: Int, minutes: [TurbulenceMinute])?
     private var plotCache: (revision: Int, entries: [String: [(sample: Sample, run: Int)]]) = (0, [:])
@@ -132,6 +135,11 @@ final class Dataset {
     /// Appends new data; within a series it must be newer than what is stored.
     func merge(_ batch: [Series]) {
         for item in batch {
+            if item.id == Series.groundStations {
+                stations.append(contentsOf: item.stations)
+                if !zip(stations, stations.dropFirst()).allSatisfy({ $0.t <= $1.t }) { stations.sort { $0.t < $1.t } }
+                continue
+            }
             // Interrogations and datalink also extend the time range, so that
             // a file of either alone can be replayed.
             let times = [item.activity.first, item.activity.last, item.uplinks.first?.t, item.uplinks.last?.t,
@@ -151,6 +159,141 @@ final class Dataset {
             }
         }
         revision += 1
+    }
+
+    /// Interrogations per interrogator code, and what each code tells:
+    /// rotation period and candidate site. Rebuilt at most every 10 s live.
+    private func interrogatorData() -> (logs: [String: InterrogationLog], interrogators: [String: Interrogator]) {
+        if let cache = interrogatorCache,
+           cache.revision == revision || (isLive && Date().timeIntervalSince(cache.at) < 10) {
+            return (cache.logs, cache.interrogators)
+        }
+        var logs: [String: InterrogationLog] = [:]
+        func add(_ code: String, _ t: Double, _ target: String, heard: Bool) {
+            logs[code, default: InterrogationLog()].times.append(t)
+            logs[code, default: InterrogationLog()].targets.append(target)
+            logs[code, default: InterrogationLog()].heard.append(heard)
+        }
+        for item in series {
+            for uplink in item.uplinks {
+                if case let .radar(code?) = uplink.origin { add(code, uplink.t, item.id, heard: true) }
+            }
+            for reply in item.replies { add(reply.code, reply.t, item.id, heard: false) }
+        }
+        for code in logs.keys {
+            let log = logs[code]!
+            let order = log.times.indices.sorted { log.times[$0] < log.times[$1] }
+            logs[code] = InterrogationLog(
+                times: order.map { log.times[$0] }, targets: order.map { log.targets[$0] }, heard: order.map { log.heard[$0] }
+            )
+        }
+        var interrogators: [String: Interrogator] = [:]
+        for (code, log) in logs {
+            var interrogator = Interrogator(code: code)
+            if !interrogator.isShared {
+                interrogator.period = log.rotationPeriod()
+                fitSites(&interrogator, log: log)
+            }
+            interrogators[code] = interrogator
+        }
+        interrogatorCache = (revision, Date(), logs, interrogators)
+        return (logs, interrogators)
+    }
+
+    /// Checks the catalogue candidates of a code against the aircraft it
+    /// addresses, as in the uplink1030 report: each aircraft, placed at the
+    /// middle of its exchanges with the code, goes to the nearest candidate
+    /// within range; candidates with enough aircraft are kept, each with the
+    /// rotation period of its own population.
+    private func fitSites(_ interrogator: inout Interrogator, log: InterrogationLog) {
+        // An aircraft counts with at least 2 interrogations heard or 5 DF 11
+        // replies naming the code: single replies are dominated by corrupted
+        // interrogator identifiers that still look legal.
+        var timesOf: [String: [Double]] = [:]
+        var targetOf: [String: String] = [:]
+        var heard: [String: Int] = [:], replies: [String: Int] = [:]
+        for i in log.times.indices {
+            let segment = Interrogator.segment(log.targets[i], log.times[i])
+            timesOf[segment, default: []].append(log.times[i])
+            targetOf[segment] = log.targets[i]
+            if log.heard[i] { heard[segment, default: 0] += 1 } else { replies[segment, default: 0] += 1 }
+        }
+        timesOf = timesOf.filter { heard[$0.key, default: 0] >= 2 || replies[$0.key, default: 0] >= 5 }
+        var places: [String: LatLon] = [:]
+        for (segment, times) in timesOf {
+            if let target = targetOf[segment], let place = position(of: target, at: times[times.count / 2]) {
+                places[segment] = place
+            }
+        }
+        interrogator.located = places.count
+        let candidates = Radars.sites[interrogator.code] ?? []
+        var members: [String: [(String, Double)]] = [:]
+        for (target, place) in places {
+            let nearest = candidates.map { ($0.name, Geo.distance($0.position, place)) }.min { $0.1 < $1.1 }
+            if let nearest, nearest.1 <= Interrogator.range {
+                members[nearest.0, default: []].append((target, nearest.1))
+            } else {
+                interrogator.unexplained += 1
+            }
+        }
+        let needed = max(3, Int((Double(places.count) * 0.1).rounded(.up)))
+        for site in candidates {
+            guard let group = members[site.name], group.count >= needed else { continue }
+            let distances = group.map(\.1).sorted()
+            let ids = Set(group.map(\.0))
+            interrogator.fits.append(SiteFit(
+                site: site, aircraft: group.count,
+                medianDistance: distances[distances.count / 2],
+                farDistance: distances[min(distances.count - 1, distances.count * 9 / 10)],
+                period: log.rotationPeriod(among: ids)
+            ))
+            for id in ids { interrogator.siteOf[id] = site.name }
+        }
+        let fewUnexplained = Double(interrogator.unexplained) <= 0.25 * Double(interrogator.located)
+        for i in interrogator.fits.indices {
+            interrogator.fits[i].consistent = fewUnexplained && interrogator.fits[i].medianDistance <= 350_000
+        }
+        interrogator.fits.sort { $0.aircraft > $1.aircraft }
+    }
+
+    /// Sites of `code` whose aircraft it addressed between `start` and `end`.
+    func activeSites(of code: String, from start: Double, to end: Double) -> Set<String> {
+        let (logs, interrogators) = interrogatorData()
+        guard let log = logs[code], let interrogator = interrogators[code], !interrogator.fits.isEmpty else { return [] }
+        var result = Set<String>()
+        var i = InterrogationLog.lowerBound(log.times, start)
+        while i < log.times.count, log.times[i] <= end {
+            if let site = interrogator.site(of: log.targets[i], at: log.times[i]) { result.insert(site) }
+            i += 1
+        }
+        return result
+    }
+
+    var interrogators: [String: Interrogator] { interrogatorData().interrogators }
+
+    /// Aircraft interrogated by `code` between `start` and `end`.
+    func interrogated(by code: String, from start: Double, to end: Double) -> Set<String> {
+        interrogatorData().logs[code]?.targets(from: start, to: end) ?? []
+    }
+
+    /// Codes heard between `start` and `end`.
+    func activeInterrogators(from start: Double, to end: Double) -> Set<String> {
+        var result = Set<String>()
+        for (code, log) in interrogatorData().logs {
+            let i = InterrogationLog.lowerBound(log.times, start)
+            if i < log.times.count, log.times[i] <= end { result.insert(code) }
+        }
+        return result
+    }
+
+    /// Every ground station heard up to `t`, at its latest reported place.
+    func groundStations(until t: Double) -> [StationReport] {
+        var latest: [String: StationReport] = [:]
+        for report in stations {
+            guard report.t <= t else { break }
+            latest[report.key] = report
+        }
+        return latest.values.sorted { $0.key < $1.key }
     }
 
     /// Targets heard from within their timeout before `t`.

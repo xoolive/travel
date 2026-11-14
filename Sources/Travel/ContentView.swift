@@ -259,6 +259,19 @@ struct ContentView: View {
 
     private static var launchOptionsApplied = false
 
+    /// Files passed at launch can also arrive as open-document events, which
+    /// load them again: waits until the same recording has stayed loaded for 3 s.
+    private func waitForStableLoad() async {
+        var stable = 0
+        var last: UUID?
+        while stable < 15 {
+            try? await Task.sleep(for: .milliseconds(200))
+            let current = state.loadProgress == nil ? state.dataset?.id : nil
+            stable = current != nil && current == last ? stable + 1 : 0
+            last = current
+        }
+    }
+
     /// Command-line options, mostly for testing:
     /// recordings, --live, --source redis://host:6379/a,b, --table,
     /// --zoom, --select <icao24 or mmsi>, --speed <factor>.
@@ -290,6 +303,36 @@ struct ContentView: View {
         if let i = options.firstIndex(of: "--select"), i + 1 < options.count {
             while state.dataset == nil { try? await Task.sleep(for: .milliseconds(200)) }
             state.selectedID = options[i + 1]
+        }
+        // --interrogators: print how each interrogator code fits the catalogue.
+        if options.contains("--interrogators") {
+            await waitForStableLoad()
+            if let dataset = state.dataset {
+                var lines: [String] = []
+                for (code, interrogator) in dataset.interrogators.sorted(by: { $0.key < $1.key }) {
+                    let period = interrogator.period.map { String(format: "%.3f s", $0) } ?? "-"
+                    var line = "\(code)\tperiod \(period)\tlocated \(interrogator.located)\tunexplained \(interrogator.unexplained)"
+                    if interrogator.isShared { line += "\tshared code" }
+                    for fit in interrogator.fits {
+                        line += String(format: "\n\t%@ (%@): %d aircraft, median %.0f km, 90%% %.0f km, period %@, %@",
+                                       fit.site.name, fit.site.basis, fit.aircraft, fit.medianDistance / 1000, fit.farDistance / 1000,
+                                       fit.period.map { String(format: "%.3f s", $0) } ?? "-", fit.consistent ? "consistent" : "weak")
+                    }
+                    lines.append(line)
+                }
+                print(lines.joined(separator: "\n"))
+                fflush(stdout)
+            }
+        }
+        // --time HH:MM[:SS]: pause at that UTC time on the recording's first day.
+        if let i = options.firstIndex(of: "--time"), i + 1 < options.count {
+            let parts = options[i + 1].split(separator: ":").compactMap { Double($0) }
+            if parts.count >= 2 {
+                await waitForStableLoad()
+                let day = (state.rangeStart / 86400).rounded(.down) * 86400
+                state.isPlaying = false
+                state.seek(to: day + parts[0] * 3600 + parts[1] * 60 + (parts.count > 2 ? parts[2] : 0))
+            }
         }
     }
 }
@@ -393,11 +436,14 @@ private struct MapPane: View {
             entities: state.entities,
             selectedID: state.selectedID,
             track: state.selectedTrack,
-            marks: state.selectedMarks,
+            marks: state.stationMarks + state.selectedMarks,
+            radars: state.radarMarks,
+            highlighted: state.highlighted,
             style: style,
             focus: focus,
             zoomRequest: zoomRequest,
-            onSelect: { state.selectedID = $0 }
+            onSelect: { state.selectedID = $0 },
+            onHoverRadar: { state.hoveredInterrogators = $0 }
         )
     }
 

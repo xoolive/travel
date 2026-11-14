@@ -111,6 +111,11 @@ final class Builder {
         if let callsign, !callsign.contains("#") { series[i].name = callsign }
         if let squawk = text(message, "squawk") { series[i].info.squawk = squawk }
         if message["df"] as? String == "18" { series[i].info.isVehicle = true }
+        // An all-call reply names the interrogator that asked for it.
+        if message["df"] as? String == "11",
+           let code = Self.interrogator(message["interrogator"]) ?? (message["frame"] as? String).flatMap(Self.allCallCode) {
+            series[i].replies.append(InterrogatorReply(t: t, code: code))
+        }
 
         if let latitude = number(message, "latitude"), let longitude = number(message, "longitude") {
             series[i].positions.append(Position(t: t, latitude: latitude, longitude: longitude))
@@ -134,18 +139,59 @@ final class Builder {
     private func uplink(_ message: NSDictionary, format: Int, t: Double) {
         var target = message["icao24"] as? String
         let kind = message["kind"] as? String
-        // ACAS broadcasts name their sender in `mid`.
-        if format == 16, let sender = message["mid"] as? String { target = sender }
+        // ACAS broadcasts carry their sender in `icao24` now (with
+        // `address_role: "sender"`), in `mid` before. Resolution messages
+        // keep the addressed target in `icao24`.
+        if format == 16, kind != "resolution", message["address_role"] == nil,
+           let sender = message["mid"] as? String {
+            target = sender
+        }
         guard let target, target != "ffffff" else { return }
         let origin: Uplink.Origin
         switch format {
         case 0: origin = .acas
         case 16: origin = kind == "resolution" ? .resolution : .acas
         case 24: origin = .elm
-        default: origin = .radar(text(message, "interrogator"))
+        default: origin = .radar(Self.interrogator(message["interrogator"]))
         }
         let i = slot(target, .aircraft)
         series[i].uplinks.append(Uplink(t: t, uplinkFormat: format, origin: origin, register: text(message, "bds")))
+    }
+
+    /// The interrogator code of a DF 11 reply, from its frame: the parity
+    /// field minus the CRC of the rest (0–15 → II, 17–79 → SI 1–63), for
+    /// recordings made before jet1090 exported it. Only the first 56 bits
+    /// count: some receivers store DF 11 frames 112 bits long.
+    static func allCallCode(_ frame: String) -> String? {
+        guard frame.count >= 14, let value = UInt64(frame.prefix(14), radix: 16) else { return nil }
+        let data = UInt32(truncatingIfNeeded: value >> 24)
+        var remainder: UInt32 = 0
+        for bit in (0..<32).reversed() {
+            remainder = (remainder << 1) | ((data >> UInt32(bit)) & 1)
+            if remainder & 0x100_0000 != 0 { remainder ^= 0x1FF_F409 }
+        }
+        for _ in 0..<24 {
+            remainder <<= 1
+            if remainder & 0x100_0000 != 0 { remainder ^= 0x1FF_F409 }
+        }
+        let syndrome = Int(remainder ^ UInt32(truncatingIfNeeded: value & 0xFF_FFFF))
+        switch syndrome {
+        case 0..<16: return "II\(syndrome)"
+        case 17...79: return "SI\(syndrome - 16)"
+        default: return nil
+        }
+    }
+
+    /// II and SI codes, written `"SI12"` now and `{"type": "SI", "value": 12}`
+    /// in earlier jet1090 output; `SI0` and `invalid` are not allocated codes.
+    static func interrogator(_ value: Any?) -> String? {
+        var code = value as? String
+        if let object = value as? NSDictionary, let type = object["type"] as? String,
+           let number = object["value"] as? NSNumber {
+            code = type + number.stringValue
+        }
+        guard let code, code != "SI0", code.hasPrefix("II") || code.hasPrefix("SI") else { return nil }
+        return code
     }
 
     /// Reads the three layouts datalink has written: flat (current, with
@@ -155,6 +201,9 @@ final class Builder {
         if let airframes = message["airframes"] as? NSDictionary {
             relayed(message, airframes, t: t)
             return
+        }
+        if let squitter = message["squitter"] as? NSDictionary {
+            self.squitter(squitter, t: t)
         }
         let body = message["message"] as? NSDictionary
         guard let avlc = message["avlc"] as? NSDictionary ?? body.flatMap({ Self.layer($0, "avlc") })
@@ -210,15 +259,67 @@ final class Builder {
 
         let arinc = message["arinc622"] as? NSDictionary
         if let arinc { summary += " · " + Self.application(arinc) }
+        // `station_latitude` and `station_longitude` now; coordinates at the
+        // end of `station_name` in earlier output.
+        var stationPosition: LatLon?
+        if let latitude = number(message, "station_latitude"), let longitude = number(message, "station_longitude") {
+            stationPosition = LatLon(latitude: latitude, longitude: longitude)
+        } else if let name = self.text(message, "station_name") {
+            // Coordinates in the name in earlier output, or an airport code.
+            stationPosition = Self.coordinates(in: name) ?? Airports.position(of: name)
+        }
+        if let station, let name = self.text(message, "station_name"), let place = stationPosition {
+            let full = self.text(message, "station_full_name")
+            groundStation(StationReport(
+                t: t, key: station, code: name.split(separator: " ").first.map(String.init) ?? station.uppercased(),
+                position: place,
+                details: (["VDL2", station.uppercased(), name.contains(" ") ? name : nil, full].compactMap { $0 }).joined(separator: " · ")
+            ))
+        }
 
         let i = slot(aircraft, .aircraft)
         series[i].datalink.append(DatalinkMessage(
             t: t, channel: channel, station: station,
             stationName: self.text(message, "station_name") ?? arinc.flatMap { self.text($0, "atsu_address") },
+            stationPosition: stationPosition,
             fromAircraft: fromAircraft, summary: summary, text: text
         ))
         let reported = arinc.map { adsc($0, into: i, t: t) } ?? false
         kinematics(message, into: i, t: t, position: !reported)
+    }
+
+    private func groundStation(_ report: StationReport) {
+        series[slot(Series.groundStations, .aircraft)].stations.append(report)
+    }
+
+    /// An ACARS squitter (label SQ), as decoded by datalink: the station
+    /// code, its airport and, from version 2, where it is.
+    private func squitter(_ squitter: NSDictionary, t: Double) {
+        guard let station = text(squitter, "station"),
+              let latitude = number(squitter, "latitude"), let longitude = number(squitter, "longitude"),
+              abs(latitude) <= 90, abs(longitude) <= 180
+        else { return }
+        let provider = text(squitter, "provider")
+        let frequency = number(squitter, "frequency_mhz").map { String(format: "%.3f MHz", $0) }
+        let details = [provider, text(squitter, "link"), frequency, "station \(station)"].compactMap { $0 }
+        groundStation(StationReport(
+            t: t, key: [provider, station].compactMap { $0 }.joined(separator: " "),
+            code: text(squitter, "airport") ?? station,
+            position: LatLon(latitude: latitude, longitude: longitude),
+            details: "ACARS squitter · " + details.joined(separator: " · ")
+        ))
+    }
+
+    /// Reads `43°36'N 001°24'E`, as written at the end of station names.
+    private static func coordinates(in name: String) -> LatLon? {
+        let pattern = #/(\d+)°(\d+)'([NS])\s+(\d+)°(\d+)'([EW])/#
+        guard let match = name.firstMatch(of: pattern),
+              let latD = Double(match.1), let latM = Double(match.2),
+              let lonD = Double(match.4), let lonM = Double(match.5)
+        else { return nil }
+        let latitude = (latD + latM / 60) * (match.3 == "S" ? -1 : 1)
+        let longitude = (lonD + lonM / 60) * (match.6 == "W" ? -1 : 1)
+        return LatLon(latitude: latitude, longitude: longitude)
     }
 
     /// The application of an ARINC 622 message, from its interline message identifier.
@@ -276,6 +377,11 @@ final class Builder {
     /// HFDL…). Its `kinematics` give a coarse position of the aircraft.
     private func relayed(_ message: NSDictionary, _ airframes: NSDictionary, t: Double) {
         let payload = airframes["payload"] as? NSDictionary ?? [:]
+        // Squitters are broadcast by ground stations: no aircraft involved.
+        if let squitter = (airframes["app"] as? NSDictionary)?["squitter"] as? NSDictionary {
+            self.squitter(squitter, t: t)
+            return
+        }
         let source = airframes["src"] as? NSDictionary
         let destination = airframes["dst"] as? NSDictionary
         let fromHex = (payload["from_hex"] as? String)?.lowercased()
