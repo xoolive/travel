@@ -313,6 +313,19 @@ struct ContentView: View {
             while state.dataset == nil { try? await Task.sleep(for: .milliseconds(200)) }
             state.selectedID = options[i + 1]
         }
+        // --plan FILE: print the route of a flight plan, resolved against the AIRAC data.
+        if let i = options.firstIndex(of: "--plan"), i + 1 < options.count {
+            let url = URL(fileURLWithPath: (options[i + 1] as NSString).expandingTildeInPath)
+            if let plan = FlightPlan.load(url) {
+                let started = Date()
+                let points = await Task.detached { plan.waypoints() }.value
+                print("\(plan.callsign) \(plan.departure)-\(plan.destination): \(points.count) points in \(Int(Date().timeIntervalSince(started))) s")
+                print(points.map(\.name).joined(separator: " "))
+            } else {
+                print("no flight plan in \(url.path)")
+            }
+            fflush(stdout)
+        }
         // --flights: print the user's flights read from Flighty, and the match now.
         if options.contains("--flights") {
             let flights = await Task.detached { Flighty.ownFlights() }.value

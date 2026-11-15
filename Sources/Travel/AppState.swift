@@ -267,8 +267,10 @@ final class AppState {
         if centerline != mineCenterline { mineCenterline = centerline }
         // The dashed route stops once the aircraft is confirmed on a runway:
         // the aligned segment shows the rest, and after landing nothing more.
+        // Not drawn either when a filed plan (field 15) gives the real route.
         var route: [LatLon] = []
         if let id, id == selectedID, let flight, alignment?.confirmed != true,
+           flightPlan(for: id, callsign: entities.first(where: { $0.id == id })?.name ?? flight.callsign) == nil,
            let entity = entities.first(where: { $0.id == id }),
            let latitude = entity.latitude, let longitude = entity.longitude {
             let target = alignment.flatMap { $0.ongoing ? $0.threshold.position : nil } ?? flight.destinationPosition

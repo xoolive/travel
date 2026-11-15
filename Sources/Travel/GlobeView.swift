@@ -877,17 +877,24 @@ struct GlobeView: NSViewRepresentable {
         }
 
         private func placeHoverLabel(on map: MKMapView) {
-            // The user's aircraft keeps its card, unless the pointer shows it already.
-            if let card = mineCard, let id = mineID, let annotation = annotations[id], hovered?.id != id {
+            // The user's aircraft keeps its own card, hovered or not: only one.
+            if let card = mineCard, let id = mineID, let annotation = annotations[id] {
                 card.isHidden = false
                 place(card, over: annotation, on: map, note: mineNote)
             } else {
                 mineCard?.isHidden = true
             }
             guard let hovered, let card = hoverCard else { return }
+            if mineCard != nil, hovered.id == mineID {
+                card.isHidden = true
+                return
+            }
             place(card, over: hovered, on: map)
         }
 
+        /// Places a card to the right of an aircraft, past its wing tip,
+        /// vertically centred on it: the icon's frame is rotated with the
+        /// track, so its drawn half-width is taken from the rotated image.
         private func place(_ card: HoverCard, over annotation: TargetAnnotation, on map: MKMapView, note: String? = nil) {
             guard let view = map.view(for: annotation) else {
                 card.isHidden = true
@@ -896,12 +903,40 @@ struct GlobeView: NSViewRepresentable {
             card.isHidden = false
             card.show(annotation.summary, note: note)
             let size = card.fittingSize
-            let anchor = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: map)
-            let above = view.bounds.height / 2 + 2
-            // Above the icon, whichever way the map's coordinates run.
-            let y = map.isFlipped ? anchor.y - above - size.height : anchor.y + above
-            card.frame = NSRect(x: (anchor.x - size.width / 2).rounded(), y: y.rounded(), width: size.width, height: size.height)
+            let center = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: map)
+            let half = Self.halfWidth(of: view)
+            let x = center.x + half + 6
+            let y = center.y - size.height / 2
+            card.frame = NSRect(x: x.rounded(), y: y.rounded(), width: size.width, height: size.height)
         }
+
+        /// Horizontal half-extent of what an annotation view draws: the
+        /// non-transparent part of its image, else its bounds.
+        private static func halfWidth(of view: MKAnnotationView) -> CGFloat {
+            guard let image = view.image else { return view.bounds.width / 2 }
+            let key = ObjectIdentifier(image)
+            if let cached = extents[key] { return cached }
+            var extent = image.size.width / 2
+            if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+               let data = cg.dataProvider?.data, let bytes = CFDataGetBytePtr(data),
+               cg.bitsPerPixel == 32, cg.width > 0 {
+                let alphaOffset: Int = switch cg.alphaInfo {
+                case .premultipliedFirst, .first, .noneSkipFirst: 0
+                default: 3
+                }
+                var maxDistance = 0
+                let mid = cg.width / 2
+                for row in 0..<cg.height {
+                    for column in 0..<cg.width where bytes[row * cg.bytesPerRow + column * 4 + alphaOffset] > 16 {
+                        maxDistance = max(maxDistance, abs(column - mid))
+                    }
+                }
+                extent = CGFloat(maxDistance) * image.size.width / CGFloat(cg.width)
+            }
+            extents[key] = extent
+            return extent
+        }
+        nonisolated(unsafe) private static var extents: [ObjectIdentifier: CGFloat] = [:]
 
         // MARK: MKMapViewDelegate
 
