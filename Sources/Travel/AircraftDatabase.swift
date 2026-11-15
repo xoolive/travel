@@ -65,6 +65,7 @@ final class AircraftDatabase {
     }
 
     deinit {
+        sqlite3_finalize(byRegistration)
         sqlite3_finalize(statement)
         sqlite3_close(connection)
     }
@@ -88,6 +89,44 @@ final class AircraftDatabase {
         // Remembered, found or not.
         table[icao24] = record
         return record
+    }
+
+    private var reverse: [String: String]?
+    private var byRegistration: OpaquePointer?
+    private var addresses: [String: String?] = [:]
+
+    /// The ICAO address of a registration such as F-HEPK, if the database knows it.
+    func address(ofRegistration registration: String) -> String? {
+        let key = registration.uppercased().replacingOccurrences(of: "-", with: "")
+        if let known = addresses[key] { return known }
+        var found: String?
+        if let connection {
+            if byRegistration == nil {
+                sqlite3_prepare_v2(
+                    connection, "SELECT ModeS FROM Aircraft WHERE replace(upper(Registration), '-', '') = ?1 LIMIT 1",
+                    -1, &byRegistration, nil
+                )
+            }
+            if let byRegistration {
+                let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+                sqlite3_reset(byRegistration)
+                sqlite3_bind_text(byRegistration, 1, key, -1, transient)
+                if sqlite3_step(byRegistration) == SQLITE_ROW {
+                    found = Self.text(byRegistration, 0)?.lowercased()
+                }
+            }
+        } else {
+            if reverse == nil {
+                var map: [String: String] = [:]
+                for (icao, record) in table {
+                    if let r = record.registration { map[r.uppercased().replacingOccurrences(of: "-", with: "")] = icao }
+                }
+                reverse = map
+            }
+            found = reverse?[key]
+        }
+        addresses[key] = found
+        return found
     }
 
     private static func text(_ statement: OpaquePointer, _ column: Int32) -> String? {

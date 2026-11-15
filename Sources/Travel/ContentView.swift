@@ -313,6 +313,18 @@ struct ContentView: View {
             while state.dataset == nil { try? await Task.sleep(for: .milliseconds(200)) }
             state.selectedID = options[i + 1]
         }
+        // --flights: print the user's flights read from Flighty, and the match now.
+        if options.contains("--flights") {
+            let flights = await Task.detached { Flighty.ownFlights() }.value
+            print("\(flights.count) own flights read from Flighty")
+            if !options.contains("--time") {
+                for flight in flights.suffix(3) {
+                    print(flight.number, flight.origin, flight.destination, flight.tail ?? "-",
+                          flight.tail.flatMap { state.database.address(ofRegistration: $0) } ?? "-")
+                }
+            }
+            fflush(stdout)
+        }
         // --interrogators: print how each interrogator code fits the catalogue.
         if options.contains("--interrogators") {
             await waitForStableLoad()
@@ -455,6 +467,8 @@ private struct MapPane: View {
             marks: state.stationMarks + state.selectedMarks,
             radars: state.radarMarks,
             highlighted: state.highlighted,
+            mineID: state.mineID,
+            route: state.mineRoute,
             style: style,
             focus: focus,
             zoomRequest: zoomRequest,

@@ -78,6 +78,13 @@ final class AppState {
     var hoveredInterrogators: [String] = [] {
         didSet { if hoveredInterrogators != oldValue { refreshInterrogators() } }
     }
+    /// The user's own flights, from the Flighty app.
+    private(set) var ownFlights: [OwnFlight] = []
+    /// The aircraft that should be the user's at the displayed time, and its flight.
+    private(set) var mineID: String?
+    private(set) var mineFlight: OwnFlight?
+    /// From the user's aircraft, when selected, to its destination.
+    private(set) var mineRoute: [LatLon] = []
     /// The radar whose card is open, by site name.
     var selectedRadar: String? {
         didSet { if selectedRadar != oldValue { refreshInterrogators() } }
@@ -97,6 +104,7 @@ final class AppState {
             if oldValue != selectedID {
                 refreshTrack()
                 refreshInterrogators()
+                refreshMine()
             }
         }
     }
@@ -135,6 +143,43 @@ final class AppState {
         } else {
             liveSources = LiveSource.defaults
         }
+        reloadOwnFlights()
+    }
+
+    /// Reads the user's flights from Flighty in the background.
+    func reloadOwnFlights() {
+        Task {
+            let flights = await Task.detached(priority: .utility) { Flighty.ownFlights() }.value
+            if flights != ownFlights {
+                ownFlights = flights
+                refreshMine()
+            }
+        }
+    }
+
+    /// The aircraft flying one of the user's flights now: its tail number,
+    /// turned into an ICAO address by the aircraft database, among what is heard.
+    private func refreshMine() {
+        var id: String?
+        var flight: OwnFlight?
+        let t = currentTime
+        for candidate in ownFlights where candidate.covers(t) {
+            guard let tail = candidate.tail, let address = database.address(ofRegistration: tail),
+                  entities.contains(where: { $0.id == address && $0.latitude != nil })
+            else { continue }
+            id = address
+            flight = candidate
+            break
+        }
+        if id != mineID { mineID = id }
+        if flight != mineFlight { mineFlight = flight }
+        var route: [LatLon] = []
+        if let id, id == selectedID, let flight,
+           let entity = entities.first(where: { $0.id == id }),
+           let latitude = entity.latitude, let longitude = entity.longitude {
+            route = [LatLon(latitude: latitude, longitude: longitude), flight.destinationPosition]
+        }
+        if route != mineRoute { mineRoute = route }
     }
 
     var isLive: Bool { dataset?.isLive ?? false }
@@ -440,6 +485,7 @@ final class AppState {
         guard let dataset else { return }
         entities = dataset.entities(at: currentTime)
         refreshTrack()
+        refreshMine()
         let stations = dataset.groundStations(until: currentTime).map {
             TrackMark(id: "g" + $0.key, kind: .groundStation, position: $0.position, label: "\($0.code)\n\($0.details)")
         }

@@ -250,6 +250,10 @@ struct GlobeView: NSViewRepresentable {
     var radars: [RadarMark] = []
     /// Aircraft drawn in the highlight colour.
     var highlighted: Set<String> = []
+    /// The user's own aircraft: its card stays shown.
+    var mineID: String?
+    /// Dashed great circle from the user's aircraft to its destination.
+    var route: [LatLon] = []
     var style: GlobeStyle
     var focus: MapFocus?
     /// Incremented to frame the data closely.
@@ -291,6 +295,7 @@ struct GlobeView: NSViewRepresentable {
         coordinator.syncTrack(track, on: map)
         coordinator.syncMarks(marks, on: map)
         coordinator.syncRadars(radars, on: map)
+        coordinator.syncMine(mineID, route: route, on: map)
         coordinator.refreshIcons(on: map)
     }
 
@@ -761,9 +766,57 @@ struct GlobeView: NSViewRepresentable {
             placeHoverLabel(on: map)
         }
 
+        // MARK: The user's own aircraft
+
+        private var mineID: String?
+        private var mineCard: HoverCard?
+        private var routeLine: MKPolyline?
+        private var routeSignature: [Double] = []
+        private static let routeTitle = "route"
+
+        func syncMine(_ id: String?, route: [LatLon], on map: MKMapView) {
+            mineID = id
+            if id == nil, let card = mineCard {
+                card.removeFromSuperview()
+                mineCard = nil
+            } else if id != nil, mineCard == nil {
+                let card = HoverCard()
+                map.addSubview(card)
+                mineCard = card
+            }
+            // Redrawn when the aircraft has moved by about a kilometre.
+            let signature = route.flatMap { [($0.latitude * 100).rounded(), ($0.longitude * 100).rounded()] }
+            guard signature != routeSignature else { return }
+            routeSignature = signature
+            if let line = routeLine { map.removeOverlay(line) }
+            routeLine = nil
+            guard route.count >= 2 else { return }
+            let coordinates = route.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+            let line = MKGeodesicPolyline(coordinates: coordinates, count: coordinates.count)
+            line.title = Self.routeTitle
+            map.addOverlay(line, level: .aboveLabels)
+            routeLine = line
+        }
+
         private func placeHoverLabel(on map: MKMapView) {
-            guard let hovered, let card = hoverCard, let view = map.view(for: hovered) else { return }
-            card.show(hovered.summary)
+            // The user's aircraft keeps its card, unless the pointer shows it already.
+            if let card = mineCard, let id = mineID, let annotation = annotations[id], hovered?.id != id {
+                card.isHidden = false
+                place(card, over: annotation, on: map)
+            } else {
+                mineCard?.isHidden = true
+            }
+            guard let hovered, let card = hoverCard else { return }
+            place(card, over: hovered, on: map)
+        }
+
+        private func place(_ card: HoverCard, over annotation: TargetAnnotation, on map: MKMapView) {
+            guard let view = map.view(for: annotation) else {
+                card.isHidden = true
+                return
+            }
+            card.isHidden = false
+            card.show(annotation.summary)
             let size = card.fittingSize
             let anchor = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: map)
             let above = view.bounds.height / 2 + 2
@@ -825,6 +878,12 @@ struct GlobeView: NSViewRepresentable {
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             guard let line = overlay as? MKPolyline else { return MKOverlayRenderer(overlay: overlay) }
             let renderer = MKPolylineRenderer(polyline: line)
+            if line.title == Self.routeTitle {
+                renderer.strokeColor = NSColor.white.withAlphaComponent(0.85)
+                renderer.lineWidth = 1.5
+                renderer.lineDashPattern = [6, 5]
+                return renderer
+            }
             if line.title == Self.downlinkTitle || line.title == Self.uplinkTitle {
                 renderer.strokeColor = (line.title == Self.downlinkTitle ? NSColor.systemOrange : .systemCyan).withAlphaComponent(0.85)
                 renderer.lineWidth = 1.2
