@@ -173,19 +173,14 @@ final class AppState {
         }
     }
 
-    /// Runway alignment of the user's aircraft over the last 15 minutes: on
-    /// the destination's runways, else (below 8,000 ft) on any runway within
-    /// 30 km, as tangram does to catch diversions. Kept 5 minutes after it ends.
+    /// Runway alignment of the user's aircraft over the last 15 minutes, on
+    /// the runways of its destination. Kept 5 minutes after it ends.
     private func alignment(of id: String, flight: OwnFlight, at t: Double) -> Alignment? {
-        guard let dataset else { return nil }
+        guard let dataset, let thresholds = Runways.byAirport[flight.destination] else { return nil }
         let path = dataset.recentPath(of: id, from: t - 900, to: t)
-        guard let last = path.last else { return nil }
-        var found = Landing.latest(path, thresholds: Runways.byAirport[flight.destination] ?? [])
-        if found == nil, (last.altitude ?? .infinity) < 8000 {
-            let nearby = Runways.near(last.position, radius: 30_000).filter { $0.airport != flight.destination }
-            found = Landing.latest(path, thresholds: nearby)
+        guard let found = Landing.latest(path, thresholds: thresholds), found.ongoing || t - found.end < 300 else {
+            return nil
         }
-        guard let found, found.ongoing || t - found.end < 300 else { return nil }
         return found
     }
 
@@ -228,8 +223,10 @@ final class AppState {
             centerline = [outer, threshold.position]
         }
         if centerline != mineCenterline { mineCenterline = centerline }
+        // The dashed route stops once the aircraft is confirmed on a runway:
+        // the aligned segment shows the rest, and after landing nothing more.
         var route: [LatLon] = []
-        if let id, id == selectedID, let flight,
+        if let id, id == selectedID, let flight, alignment?.confirmed != true,
            let entity = entities.first(where: { $0.id == id }),
            let latitude = entity.latitude, let longitude = entity.longitude {
             let target = alignment.flatMap { $0.ongoing ? $0.threshold.position : nil } ?? flight.destinationPosition

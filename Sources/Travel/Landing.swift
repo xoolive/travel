@@ -30,12 +30,6 @@ enum Runways {
         }
         return result
     }()
-
-    /// Thresholds within `radius` metres of a point, for when the destination
-    /// is unknown or is not where the aircraft lands.
-    static func near(_ point: LatLon, radius: Double) -> [Threshold] {
-        byAirport.values.lazy.flatMap { $0 }.filter { Geo.distance($0.position, point) <= radius }
-    }
 }
 
 /// One point of a recent trajectory, with what the alignment test needs.
