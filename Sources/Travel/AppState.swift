@@ -88,6 +88,9 @@ final class AppState {
     private(set) var mineRoute: [LatLon] = []
     /// The runway the user's aircraft is aligned with, or was in the last 5 minutes.
     private(set) var mineAlignment: Alignment?
+    /// Confirmed runway alignments, by flight: the flight has landed after them.
+    @ObservationIgnored private var landed: [String: Alignment] = [:]
+    @ObservationIgnored private var scanned: [String: Double] = [:]
     /// The third line of the user's aircraft card.
     var mineNote: String? {
         guard let flight = mineFlight else { return nil }
@@ -175,13 +178,30 @@ final class AppState {
 
     /// Runway alignment of the user's aircraft over the last 15 minutes, on
     /// the runways of its destination. Kept 5 minutes after it ends.
+    ///
+    /// A confirmed alignment is remembered for the flight: after it, the
+    /// aircraft has landed and no route is drawn any more, however long ago.
+    /// Going back in time before it shows the flight as before.
     private func alignment(of id: String, flight: OwnFlight, at t: Double) -> Alignment? {
         guard let dataset, let thresholds = Runways.byAirport[flight.destination] else { return nil }
+        let key = "\(flight.number)@\(Int(flight.departure))"
         let path = dataset.recentPath(of: id, from: t - 900, to: t)
-        guard let found = Landing.latest(path, thresholds: thresholds), found.ongoing || t - found.end < 300 else {
-            return nil
+        if let found = Landing.latest(path, thresholds: thresholds) {
+            if found.confirmed { landed[key] = found }
+            if found.ongoing || t - found.end < 300 { return found }
         }
-        return found
+        // Jumped past the landing in a replay: look back over the whole
+        // flight, at most once per minute of displayed time.
+        if landed[key] == nil, t - 900 > flight.departure - 1800, abs(t - (scanned[key] ?? -.infinity)) > 60 {
+            scanned[key] = t
+            let whole = dataset.recentPath(of: id, from: flight.departure - 1800, to: t)
+            if let found = Landing.latest(whole, thresholds: thresholds), found.confirmed { landed[key] = found }
+        }
+        if var past = landed[key], t >= past.start {
+            past.ongoing = false
+            return past
+        }
+        return nil
     }
 
     /// The aircraft flying one of the user's flights now: its tail number,

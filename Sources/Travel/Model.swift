@@ -34,6 +34,8 @@ struct Position: Sendable {
     var t: Double
     var latitude: Double
     var longitude: Double
+    /// From a surface position message (BDS 0,6): the aircraft is on the ground.
+    var surface = false
 }
 
 struct TrackPoint: Sendable, Equatable {

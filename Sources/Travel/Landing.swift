@@ -40,6 +40,8 @@ struct PathPoint: Sendable {
     var altitude: Double?
     /// Degrees, true.
     var track: Double?
+    /// From a surface position message (BDS 0,6).
+    var onGround: Bool
 }
 
 /// A stretch of trajectory aligned with a runway's extended centreline.
@@ -60,7 +62,9 @@ struct Alignment: Sendable, Equatable {
 /// - lateral offset from the extended centreline, distance to the threshold
 ///   (NM) times the bearing difference (radians), below 0.1 NM;
 /// - heading towards the threshold: cos(bearing to threshold − track) > 0;
-/// - below the airport elevation plus 5,000 ft;
+/// - below the airport elevation plus 5,000 ft when the altitude is known;
+/// - in the air: surface positions (BDS 0,6) are left out, unlike in traffic,
+///   since a live trajectory goes on with the taxi;
 /// - aligned positions split at gaps over 20 s; a stretch counts once it
 ///   lasts a minute, and is reported earlier as not yet confirmed.
 enum Landing {
@@ -76,7 +80,11 @@ enum Landing {
             var start: Double?, end = 0.0
             var last: Alignment?
             for p in path {
-                guard let altitude = p.altitude, altitude < threshold.elevation + ceiling else { continue }
+                // Only in the air, as told by surface position messages (BDS
+                // 0,6), not by altitude: taxiing back along a runway after
+                // landing would otherwise read as its opposite end.
+                guard !p.onGround else { continue }
+                if let altitude = p.altitude, altitude >= threshold.elevation + ceiling { continue }
                 let toThreshold = Geo.bearing(p.position, threshold.position)
                 let nm = Geo.distance(p.position, threshold.position) / 1852
                 let difference = abs(((toThreshold - threshold.bearing + 540).truncatingRemainder(dividingBy: 360)) - 180)

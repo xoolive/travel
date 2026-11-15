@@ -123,7 +123,8 @@ final class Builder {
         }
 
         if let latitude = number(message, "latitude"), let longitude = number(message, "longitude") {
-            series[i].positions.append(Position(t: t, latitude: latitude, longitude: longitude))
+            let surface = message["bds"] as? String == "06"
+            series[i].positions.append(Position(t: t, latitude: latitude, longitude: longitude, surface: surface))
             // Surface position messages carry no altitude.
             if message["bds"] as? String == "06" {
                 series[i].channels[Channel.altitude.rawValue].append(Sample(t: t, v: 0))

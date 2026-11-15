@@ -135,7 +135,10 @@ final class Dataset {
             if track == nil, let previous, Geo.distance(previous, here) > 50 {
                 track = Geo.bearing(previous, here)
             }
-            path.append(PathPoint(t: p.t, position: here, altitude: value(.altitude, at: p.t, within: 30), track: track))
+            path.append(PathPoint(
+                t: p.t, position: here, altitude: value(.altitude, at: p.t, within: 30), track: track,
+                onGround: p.surface
+            ))
             previous = here
         }
         return path
