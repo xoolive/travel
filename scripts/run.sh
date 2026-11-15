@@ -38,6 +38,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+# A stable identity keeps macOS permissions (such as reading Flighty's data)
+# across rebuilds; ad-hoc signing makes every build a new app to macOS.
+IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
+codesign --force --sign "${IDENTITY:--}" "$APP" >/dev/null 2>&1 || codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 # Extra arguments are recordings to load at launch (absolute paths).
 [ -n "$NO_OPEN" ] || open "$APP" --args "$@"
