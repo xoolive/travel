@@ -38,6 +38,7 @@ struct SourceItem: Identifiable, Hashable {
 final class AppState {
     private static let livePrefix = "live:"
     private static let liveSourcesKey = "liveSources"
+    private static let uplinkChannelKey = "addedUplink1030Channel"
     private static let databaseKey = "aircraftDatabase"
 
     enum LiveStatus: Equatable {
@@ -170,6 +171,16 @@ final class AppState {
         if let data = UserDefaults.standard.data(forKey: Self.liveSourcesKey),
            let saved = try? JSONDecoder().decode([LiveSource].self, from: data) {
             liveSources = saved
+            // Sources saved before uplink1030 was a default channel: add it
+            // once to Redis sources that follow jet1090. Removing it later sticks.
+            if !UserDefaults.standard.bool(forKey: Self.uplinkChannelKey) {
+                for i in liveSources.indices where liveSources[i].device == nil
+                    && liveSources[i].channelList.contains("jet1090") && !liveSources[i].channelList.contains("uplink1030") {
+                    liveSources[i].channels += " uplink1030"
+                }
+                UserDefaults.standard.set(true, forKey: Self.uplinkChannelKey)
+                persistLiveSources()
+            }
         } else {
             liveSources = LiveSource.defaults
         }

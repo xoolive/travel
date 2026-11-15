@@ -53,28 +53,10 @@ struct Waypoint: Sendable, Equatable {
     var position: LatLon
 }
 
-/// Named points from `navaids.csv` (scripts/make-navaids.py), by name.
-enum Navaids {
-    static let points: [String: [LatLon]] = {
-        guard let url = Bundle.main.url(forResource: "navaids", withExtension: "csv"),
-              let text = try? String(contentsOf: url, encoding: .utf8)
-        else { return [:] }
-        var result: [String: [LatLon]] = [:]
-        for line in text.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
-            let f = line.split(separator: ",")
-            guard f.count == 3, let lat = Double(f[1]), let lon = Double(f[2]) else { continue }
-            result[String(f[0]), default: []].append(LatLon(latitude: lat, longitude: lon))
-        }
-        return result
-    }()
-}
-
 extension FlightPlan {
-    /// The route of field 15 as points: departure airport, the named points
-    /// and coordinates of the route (each name taken nearest the previous
-    /// point, since names repeat worldwide), destination airport. Speed and
-    /// level groups, DCT, SIDs, STARs and airways are left out: an airway is
-    /// drawn as a straight leg between its entry and exit points.
+    /// The route of field 15 as points: departure airport, the coordinates
+    /// written in the route, destination airport. Named points are not placed
+    /// yet: they need the AIRAC navigation data (see docs/plan.md).
     func waypoints() -> [Waypoint] {
         var result: [Waypoint] = []
         var last = Airports.position(of: departure)
@@ -86,8 +68,7 @@ extension FlightPlan {
             switch kind {
             case let .coordinates(position): place = position
             case .point:
-                let candidates = Navaids.points[token] ?? []
-                place = last.map { here in candidates.min { Geo.distance($0, here) < Geo.distance($1, here) } } ?? candidates.first
+                place = nil
             }
             if let place {
                 result.append(Waypoint(name: token, position: place))
