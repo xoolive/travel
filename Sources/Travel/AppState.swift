@@ -80,6 +80,8 @@ final class AppState {
     }
     /// Flight plans dropped by the user (B2B .flight.json).
     private(set) var flightPlans: [FlightPlan] = []
+    /// Their routes, placed on the map (in the background: the navaid table is large).
+    private(set) var planRoutes: [String: [Waypoint]] = [:]
 
     /// The flight plan of an aircraft: by address, else by callsign.
     func flightPlan(for id: String, callsign: String?) -> FlightPlan? {
@@ -281,6 +283,10 @@ final class AppState {
             if let plan = FlightPlan.load(url) {
                 flightPlans.removeAll { $0.id == plan.id }
                 flightPlans.append(plan)
+                Task {
+                    let points = await Task.detached(priority: .userInitiated) { plan.waypoints() }.value
+                    planRoutes[plan.id] = points
+                }
             } else {
                 loadError = "No flight plan (field 15) in \(url.lastPathComponent)."
             }

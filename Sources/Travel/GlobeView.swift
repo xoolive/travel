@@ -266,6 +266,8 @@ struct GlobeView: NSViewRepresentable {
     var mineID: String?
     /// Dashed great circle from the user's aircraft to its destination.
     var route: [LatLon] = []
+    /// Routes of dropped flight plans, departure to destination.
+    var plans: [[LatLon]] = []
     /// Third line of the user's aircraft card (flight, runway alignment).
     var mineNote: String?
     /// Extended centreline of the runway the user's aircraft is aligned with.
@@ -310,6 +312,7 @@ struct GlobeView: NSViewRepresentable {
         coordinator.syncSelection(selectedID, on: map)
         coordinator.syncTrack(track, on: map)
         coordinator.syncMarks(marks, on: map)
+        coordinator.syncPlans(plans, on: map)
         coordinator.syncRadars(radars, on: map)
         coordinator.syncMine(mineID, route: route, note: mineNote, centerline: centerline, on: map)
         coordinator.refreshIcons(on: map)
@@ -516,6 +519,46 @@ struct GlobeView: NSViewRepresentable {
             if !lines.isEmpty { map.addOverlays(lines, level: .aboveLabels) }
         }
 
+        // MARK: Flight plans
+
+        private var planLines: [MKPolyline] = []
+        private var planSignature: [Double] = []
+        private static let planTitle = "plan"
+
+        func syncPlans(_ plans: [[LatLon]], on map: MKMapView) {
+            let signature = plans.flatMap { [Double($0.count)] + $0.flatMap { [$0.latitude, $0.longitude] } }
+            guard signature != planSignature else { return }
+            planSignature = signature
+            map.removeOverlays(planLines)
+            planLines = plans.filter { $0.count >= 2 }.map { points in
+                let coordinates = points.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+                let line = MKGeodesicPolyline(coordinates: coordinates, count: coordinates.count)
+                line.title = Self.planTitle
+                return line
+            }
+            map.addOverlays(planLines, level: .aboveLabels)
+        }
+
+        /// A small dot with the waypoint's name beside it.
+        private static func waypointImage(_ name: String) -> NSImage {
+            let text = NSAttributedString(string: name, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 9.5, weight: .semibold), .foregroundColor: NSColor.white,
+                .strokeColor: NSColor.black.withAlphaComponent(0.7), .strokeWidth: -3.0,
+            ])
+            let dot: CGFloat = 7
+            let width = dot + 3 + ceil(text.size().width)
+            let height = max(dot, ceil(text.size().height))
+            return NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
+                let circle = NSRect(x: 0, y: (rect.height - dot) / 2, width: dot, height: dot)
+                NSColor.systemPurple.setFill()
+                NSBezierPath(ovalIn: circle).fill()
+                NSColor.white.setStroke()
+                NSBezierPath(ovalIn: circle.insetBy(dx: 0.5, dy: 0.5)).stroke()
+                text.draw(at: NSPoint(x: dot + 3, y: (rect.height - text.size().height) / 2))
+                return true
+            }
+        }
+
         // MARK: Radars
 
         private var radarAnnotations: [String: RadarAnnotation] = [:]
@@ -610,6 +653,7 @@ struct GlobeView: NSViewRepresentable {
             case .datalinkUp: .systemCyan
             case .resolution: .systemRed
             case .groundStation: .systemGray
+            case .waypoint: .systemPurple
             }
             let symbol = kind == .resolution ? "exclamationmark.triangle.fill" : "envelope.fill"
             let configuration = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
@@ -878,6 +922,14 @@ struct GlobeView: NSViewRepresentable {
             }
             if let mark = annotation as? MarkAnnotation {
                 let view = MKAnnotationView(annotation: mark, reuseIdentifier: nil)
+                if mark.mark.kind == .waypoint {
+                    let image = Self.waypointImage(mark.mark.label)
+                    view.image = image
+                    view.centerOffset = CGPoint(x: (image.size.width - 7) / 2, y: 0)
+                    view.displayPriority = .defaultHigh
+                    view.zPriority = .min
+                    return view
+                }
                 if mark.mark.kind == .groundStation {
                     let image = Self.stationImage(mark.mark.label.components(separatedBy: "\n")[0])
                     view.image = image
@@ -912,6 +964,12 @@ struct GlobeView: NSViewRepresentable {
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             guard let line = overlay as? MKPolyline else { return MKOverlayRenderer(overlay: overlay) }
             let renderer = MKPolylineRenderer(polyline: line)
+            if line.title == Self.planTitle {
+                renderer.strokeColor = NSColor.systemPurple.withAlphaComponent(0.9)
+                renderer.lineWidth = 2
+                renderer.lineDashPattern = [6, 4]
+                return renderer
+            }
             if line.title == Self.centerlineTitle {
                 renderer.strokeColor = NSColor.systemGreen.withAlphaComponent(0.9)
                 renderer.lineWidth = 2

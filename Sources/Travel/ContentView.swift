@@ -464,11 +464,12 @@ private struct MapPane: View {
             entities: state.entities,
             selectedID: state.selectedID,
             track: state.selectedTrack,
-            marks: state.stationMarks + state.selectedMarks,
+            marks: state.stationMarks + state.selectedMarks + planMarks,
             radars: state.radarMarks,
             highlighted: state.highlighted,
             mineID: state.mineID,
             route: state.mineRoute,
+            plans: Array(state.planRoutes.values).map { $0.map(\.position) },
             mineNote: state.mineNote,
             centerline: state.mineAlignment?.ongoing == true ? state.mineCenterline : [],
             style: style,
@@ -478,6 +479,15 @@ private struct MapPane: View {
             onHoverRadar: { state.hoveredInterrogators = $0 },
             onSelectRadar: { state.selectedRadar = state.selectedRadar == $0 ? nil : $0 }
         )
+    }
+
+    /// Waypoint names of the dropped flight plans (airports aside).
+    private var planMarks: [TrackMark] {
+        state.planRoutes.flatMap { id, points in
+            points.dropFirst().dropLast().enumerated().map { n, point in
+                TrackMark(id: "p\(id)\(n)", kind: .waypoint, position: point.position, label: point.name)
+            }
+        }
     }
 
     private var focus: MapFocus? {

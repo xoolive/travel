@@ -46,3 +46,78 @@ struct FlightPlan: Sendable, Equatable, Identifiable {
         )
     }
 }
+
+/// A waypoint of a flight plan, placed on the map.
+struct Waypoint: Sendable, Equatable {
+    var name: String
+    var position: LatLon
+}
+
+/// Named points from `navaids.csv` (scripts/make-navaids.py), by name.
+enum Navaids {
+    static let points: [String: [LatLon]] = {
+        guard let url = Bundle.main.url(forResource: "navaids", withExtension: "csv"),
+              let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return [:] }
+        var result: [String: [LatLon]] = [:]
+        for line in text.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
+            let f = line.split(separator: ",")
+            guard f.count == 3, let lat = Double(f[1]), let lon = Double(f[2]) else { continue }
+            result[String(f[0]), default: []].append(LatLon(latitude: lat, longitude: lon))
+        }
+        return result
+    }()
+}
+
+extension FlightPlan {
+    /// The route of field 15 as points: departure airport, the named points
+    /// and coordinates of the route (each name taken nearest the previous
+    /// point, since names repeat worldwide), destination airport. Speed and
+    /// level groups, DCT, SIDs, STARs and airways are left out: an airway is
+    /// drawn as a straight leg between its entry and exit points.
+    func waypoints() -> [Waypoint] {
+        var result: [Waypoint] = []
+        var last = Airports.position(of: departure)
+        if let last { result.append(Waypoint(name: departure, position: last)) }
+        for raw in route.split(separator: " ") {
+            let token = String(raw.split(separator: "/").first ?? raw)
+            guard let kind = Self.classify(token) else { continue }
+            var place: LatLon?
+            switch kind {
+            case let .coordinates(position): place = position
+            case .point:
+                let candidates = Navaids.points[token] ?? []
+                place = last.map { here in candidates.min { Geo.distance($0, here) < Geo.distance($1, here) } } ?? candidates.first
+            }
+            if let place {
+                result.append(Waypoint(name: token, position: place))
+                last = place
+            }
+        }
+        if let end = Airports.position(of: destination) {
+            result.append(Waypoint(name: destination, position: end))
+        }
+        return result
+    }
+
+    private enum Token {
+        case point
+        case coordinates(LatLon)
+    }
+
+    private static func classify(_ token: String) -> Token? {
+        // Named points: 2 to 5 letters (NDB, VOR, fixes); "DCT" is not one.
+        if token != "DCT", (2...5).contains(token.count), token.allSatisfy({ $0.isUppercase && $0.isLetter }) {
+            return .point
+        }
+        // Coordinates: 46N001E, 4620N00105E.
+        if let match = token.wholeMatch(of: #/(\d{2})(\d{2})?([NS])(\d{3})(\d{2})?([EW])/#) {
+            let lat = Double(match.1)! + (match.2.flatMap { Double($0) } ?? 0) / 60
+            let lon = Double(match.4)! + (match.5.flatMap { Double($0) } ?? 0) / 60
+            return .coordinates(LatLon(latitude: match.3 == "S" ? -lat : lat, longitude: match.6 == "W" ? -lon : lon))
+        }
+        // Everything else: speed and level (N0410F300), SIDs and STARs
+        // (FISTO7B), airways (UT182).
+        return nil
+    }
+}

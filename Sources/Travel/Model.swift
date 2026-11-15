@@ -73,6 +73,8 @@ struct TrackMark: Sendable, Equatable, Identifiable {
         case datalinkDown
         case resolution
         case groundStation
+        /// A waypoint of a dropped flight plan.
+        case waypoint
     }
 
     var id: String
