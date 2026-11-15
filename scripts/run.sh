@@ -32,7 +32,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
             <key>CFBundleTypeRole</key><string>Viewer</string>
             <key>LSHandlerRank</key><string>Alternate</string>
             <key>CFBundleTypeExtensions</key>
-            <array><string>jsonl</string><string>zst</string><string>7z</string></array>
+            <array><string>jsonl</string><string>zst</string><string>7z</string><string>json</string></array>
         </dict>
     </array>
 </dict>

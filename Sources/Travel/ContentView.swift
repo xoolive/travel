@@ -82,7 +82,7 @@ private func chooseFiles(for state: AppState) {
     let panel = NSOpenPanel()
     panel.allowsMultipleSelection = true
     panel.canChooseDirectories = false
-    panel.message = "Choose jet1090 or ship162 recordings (.jsonl, .jsonl.zst or .jsonl.7z)"
+    panel.message = "Choose jet1090 or ship162 recordings (.jsonl, .jsonl.zst or .jsonl.7z), or flight plans (.flight.json)"
     if panel.runModal() == .OK { state.add(panel.urls) }
 }
 
@@ -1041,6 +1041,31 @@ private struct DeviceTree: View {
 // MARK: Target detail
 
 /// The selected aircraft or ship: current state and plots over time.
+/// The filed flight plan of an aircraft: route, times and ICAO field 15.
+private struct FlightPlanView: View {
+    let plan: FlightPlan
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("FLIGHT PLAN")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text([plan.callsign, plan.aircraftType].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Text("\(plan.departure) → \(plan.destination) · EOBT \(plan.eobt.split(separator: " ").last.map(String.init) ?? plan.eobt)")
+                .font(.callout)
+            Text(plan.route)
+                .font(.callout.monospaced())
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 private struct TargetDetail: View {
     @Bindable var state: AppState
     let id: String
@@ -1074,6 +1099,11 @@ private struct TargetDetail: View {
                     } else {
                         Text("Not received at this time")
                             .foregroundStyle(.secondary)
+                    }
+
+                    if let plan = state.flightPlan(for: id, callsign: entity?.name ?? state.dataset?.name(of: id)) {
+                        Divider()
+                        FlightPlanView(plan: plan)
                     }
 
                     Divider()

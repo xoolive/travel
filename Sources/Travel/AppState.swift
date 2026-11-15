@@ -78,6 +78,15 @@ final class AppState {
     var hoveredInterrogators: [String] = [] {
         didSet { if hoveredInterrogators != oldValue { refreshInterrogators() } }
     }
+    /// Flight plans dropped by the user (B2B .flight.json).
+    private(set) var flightPlans: [FlightPlan] = []
+
+    /// The flight plan of an aircraft: by address, else by callsign.
+    func flightPlan(for id: String, callsign: String?) -> FlightPlan? {
+        flightPlans.last { $0.address == id }
+            ?? callsign.flatMap { name in flightPlans.last { $0.callsign == name.uppercased() } }
+    }
+
     /// The user's own flights, from the Flighty app.
     private(set) var ownFlights: [OwnFlight] = []
     /// The aircraft that should be the user's at the displayed time, and its flight.
@@ -266,9 +275,22 @@ final class AppState {
 
     /// Adds files to the sidebar and shows them.
     func add(_ urls: [URL]) {
-        let urls = urls.filter(RecordingLoader.isSupported).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        // Flight plans join whatever is shown, live or recorded.
+        let plans = urls.filter(FlightPlan.isPlan)
+        for url in plans {
+            if let plan = FlightPlan.load(url) {
+                flightPlans.removeAll { $0.id == plan.id }
+                flightPlans.append(plan)
+            } else {
+                loadError = "No flight plan (field 15) in \(url.lastPathComponent)."
+            }
+        }
+        let urls = urls.filter { !FlightPlan.isPlan($0) && RecordingLoader.isSupported($0) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !urls.isEmpty else {
-            loadError = "Drop jet1090 or ship162 recordings (.jsonl, .jsonl.zst or .jsonl.7z)."
+            if plans.isEmpty {
+                loadError = "Drop jet1090 or ship162 recordings (.jsonl, .jsonl.zst or .jsonl.7z) or flight plans (.flight.json)."
+            }
             return
         }
         for url in urls where !sources.contains(where: { $0.id == url.path }) {
