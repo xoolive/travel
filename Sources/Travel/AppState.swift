@@ -83,8 +83,24 @@ final class AppState {
     /// The aircraft that should be the user's at the displayed time, and its flight.
     private(set) var mineID: String?
     private(set) var mineFlight: OwnFlight?
-    /// From the user's aircraft, when selected, to its destination.
+    /// From the user's aircraft, when selected, to its destination (or to the
+    /// runway threshold once aligned).
     private(set) var mineRoute: [LatLon] = []
+    /// The runway the user's aircraft is aligned with, or was in the last 5 minutes.
+    private(set) var mineAlignment: Alignment?
+    /// The third line of the user's aircraft card.
+    var mineNote: String? {
+        guard let flight = mineFlight else { return nil }
+        guard let a = mineAlignment else { return "\(flight.number) → \(flight.destination)" }
+        let runway = a.threshold.name
+        if a.ongoing {
+            return a.confirmed ? "\(flight.number) · aligned on \(a.threshold.airport) \(runway)" : "\(flight.number) · aligning on \(runway)"
+        }
+        let until = Date(timeIntervalSince1970: a.end).formatted(Date.FormatStyle(timeZone: .gmt).hour(.twoDigits(amPM: .omitted)).minute())
+        return "\(flight.number) · was on \(a.threshold.airport) \(runway) until \(until)"
+    }
+    /// Ten nautical miles of extended centreline before that threshold.
+    private(set) var mineCenterline: [LatLon] = []
     /// The radar whose card is open, by site name.
     var selectedRadar: String? {
         didSet { if selectedRadar != oldValue { refreshInterrogators() } }
@@ -157,13 +173,30 @@ final class AppState {
         }
     }
 
+    /// Runway alignment of the user's aircraft over the last 15 minutes: on
+    /// the destination's runways, else (below 8,000 ft) on any runway within
+    /// 30 km, as tangram does to catch diversions. Kept 5 minutes after it ends.
+    private func alignment(of id: String, flight: OwnFlight, at t: Double) -> Alignment? {
+        guard let dataset else { return nil }
+        let path = dataset.recentPath(of: id, from: t - 900, to: t)
+        guard let last = path.last else { return nil }
+        var found = Landing.latest(path, thresholds: Runways.byAirport[flight.destination] ?? [])
+        if found == nil, (last.altitude ?? .infinity) < 8000 {
+            let nearby = Runways.near(last.position, radius: 30_000).filter { $0.airport != flight.destination }
+            found = Landing.latest(path, thresholds: nearby)
+        }
+        guard let found, found.ongoing || t - found.end < 300 else { return nil }
+        return found
+    }
+
     /// The aircraft flying one of the user's flights now: its tail number,
     /// turned into an ICAO address by the aircraft database, among what is heard.
     private func refreshMine() {
         var id: String?
         var flight: OwnFlight?
         let t = currentTime
-        for candidate in ownFlights where candidate.covers(t) {
+        let flying = ownFlights.filter { $0.covers(t) }
+        for candidate in flying {
             guard let tail = candidate.tail, let address = database.address(ofRegistration: tail),
                   entities.contains(where: { $0.id == address && $0.latitude != nil })
             else { continue }
@@ -171,13 +204,36 @@ final class AppState {
             flight = candidate
             break
         }
+        // Tail unknown (not assigned yet, or not in the aircraft database):
+        // the callsign, when it is the airline's ICAO code and the flight
+        // number (AF162 → AFR162). Signal level is no help: on board, the
+        // receiver does not hear its own aircraft louder than the others.
+        if id == nil {
+            for candidate in flying {
+                guard let callsign = candidate.callsign,
+                      let entity = entities.first(where: { $0.latitude != nil && $0.name?.uppercased() == callsign })
+                else { continue }
+                id = entity.id
+                flight = candidate
+                break
+            }
+        }
         if id != mineID { mineID = id }
         if flight != mineFlight { mineFlight = flight }
+        let alignment = id.flatMap { id in flight.flatMap { alignment(of: id, flight: $0, at: t) } }
+        if alignment != mineAlignment { mineAlignment = alignment }
+        var centerline: [LatLon] = []
+        if let threshold = alignment.map(\.threshold) {
+            let outer = Geo.destination(threshold.position, bearing: threshold.bearing + 180, distance: 10 * 1852)
+            centerline = [outer, threshold.position]
+        }
+        if centerline != mineCenterline { mineCenterline = centerline }
         var route: [LatLon] = []
         if let id, id == selectedID, let flight,
            let entity = entities.first(where: { $0.id == id }),
            let latitude = entity.latitude, let longitude = entity.longitude {
-            route = [LatLon(latitude: latitude, longitude: longitude), flight.destinationPosition]
+            let target = alignment.flatMap { $0.ongoing ? $0.threshold.position : nil } ?? flight.destinationPosition
+            route = [LatLon(latitude: latitude, longitude: longitude), target]
         }
         if route != mineRoute { mineRoute = route }
     }

@@ -144,8 +144,11 @@ struct Info: Sendable, Equatable {
     var status: String?
     var flag: String?
     var country: String?
+    /// Latest received signal level (jet1090 metadata), dBFS for SDR sources.
+    var rssi: Double?
 
     mutating func merge(_ other: Info) {
+        rssi = other.rssi ?? rssi
         registration = other.registration ?? registration
         typecode = other.typecode ?? typecode
         isVehicle = isVehicle || other.isVehicle

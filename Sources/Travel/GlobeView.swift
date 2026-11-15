@@ -140,6 +140,8 @@ final class HoverCard: NSVisualEffectView {
     private let origin = NSTextField(labelWithString: "")
     private let type = NSTextField(labelWithString: "")
     private let address = NSTextField(labelWithString: "")
+    /// A third line, for the user's own aircraft: its flight and runway.
+    private let note = NSTextField(labelWithString: "")
 
     init() {
         super.init(frame: .zero)
@@ -161,19 +163,27 @@ final class HoverCard: NSVisualEffectView {
             field.textColor = NSColor.white.withAlphaComponent(0.65)
         }
 
+        note.font = .systemFont(ofSize: 11, weight: .semibold)
+        note.textColor = .systemGreen
+        note.isHidden = true
+
         let grid = NSGridView(views: [[primary, origin], [type, address]])
         grid.rowSpacing = 2
         grid.columnSpacing = 18
         grid.rowAlignment = .firstBaseline
         grid.column(at: 0).xPlacement = .leading
         grid.column(at: 1).xPlacement = .trailing
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(grid)
+        let stack = NSStackView(views: [grid, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 3
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
         NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            grid.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            grid.topAnchor.constraint(equalTo: topAnchor, constant: 7),
-            grid.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
         ])
     }
 
@@ -182,7 +192,9 @@ final class HoverCard: NSVisualEffectView {
         fatalError("not used")
     }
 
-    func show(_ content: Content) {
+    func show(_ content: Content, note text: String? = nil) {
+        note.stringValue = text ?? ""
+        note.isHidden = text == nil
         // Without a callsign the tail number, or else the address, leads.
         let lead = content.name ?? content.registration ?? content.address
         primary.stringValue = lead
@@ -254,6 +266,10 @@ struct GlobeView: NSViewRepresentable {
     var mineID: String?
     /// Dashed great circle from the user's aircraft to its destination.
     var route: [LatLon] = []
+    /// Third line of the user's aircraft card (flight, runway alignment).
+    var mineNote: String?
+    /// Extended centreline of the runway the user's aircraft is aligned with.
+    var centerline: [LatLon] = []
     var style: GlobeStyle
     var focus: MapFocus?
     /// Incremented to frame the data closely.
@@ -295,7 +311,7 @@ struct GlobeView: NSViewRepresentable {
         coordinator.syncTrack(track, on: map)
         coordinator.syncMarks(marks, on: map)
         coordinator.syncRadars(radars, on: map)
-        coordinator.syncMine(mineID, route: route, on: map)
+        coordinator.syncMine(mineID, route: route, note: mineNote, centerline: centerline, on: map)
         coordinator.refreshIcons(on: map)
     }
 
@@ -769,13 +785,31 @@ struct GlobeView: NSViewRepresentable {
         // MARK: The user's own aircraft
 
         private var mineID: String?
+        private var mineNote: String?
         private var mineCard: HoverCard?
+        private var centerlineLine: MKPolyline?
+        private var centerlineSignature: [Double] = []
+        private static let centerlineTitle = "centerline"
         private var routeLine: MKPolyline?
         private var routeSignature: [Double] = []
         private static let routeTitle = "route"
 
-        func syncMine(_ id: String?, route: [LatLon], on map: MKMapView) {
+        func syncMine(_ id: String?, route: [LatLon], note: String?, centerline: [LatLon], on map: MKMapView) {
             mineID = id
+            mineNote = note
+            let centerSignature = centerline.flatMap { [($0.latitude * 1e4).rounded(), ($0.longitude * 1e4).rounded()] }
+            if centerSignature != centerlineSignature {
+                centerlineSignature = centerSignature
+                if let line = centerlineLine { map.removeOverlay(line) }
+                centerlineLine = nil
+                if centerline.count >= 2 {
+                    let coordinates = centerline.map { CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude) }
+                    let line = MKGeodesicPolyline(coordinates: coordinates, count: coordinates.count)
+                    line.title = Self.centerlineTitle
+                    map.addOverlay(line, level: .aboveLabels)
+                    centerlineLine = line
+                }
+            }
             if id == nil, let card = mineCard {
                 card.removeFromSuperview()
                 mineCard = nil
@@ -802,7 +836,7 @@ struct GlobeView: NSViewRepresentable {
             // The user's aircraft keeps its card, unless the pointer shows it already.
             if let card = mineCard, let id = mineID, let annotation = annotations[id], hovered?.id != id {
                 card.isHidden = false
-                place(card, over: annotation, on: map)
+                place(card, over: annotation, on: map, note: mineNote)
             } else {
                 mineCard?.isHidden = true
             }
@@ -810,13 +844,13 @@ struct GlobeView: NSViewRepresentable {
             place(card, over: hovered, on: map)
         }
 
-        private func place(_ card: HoverCard, over annotation: TargetAnnotation, on map: MKMapView) {
+        private func place(_ card: HoverCard, over annotation: TargetAnnotation, on map: MKMapView, note: String? = nil) {
             guard let view = map.view(for: annotation) else {
                 card.isHidden = true
                 return
             }
             card.isHidden = false
-            card.show(annotation.summary)
+            card.show(annotation.summary, note: note)
             let size = card.fittingSize
             let anchor = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: map)
             let above = view.bounds.height / 2 + 2
@@ -878,6 +912,12 @@ struct GlobeView: NSViewRepresentable {
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             guard let line = overlay as? MKPolyline else { return MKOverlayRenderer(overlay: overlay) }
             let renderer = MKPolylineRenderer(polyline: line)
+            if line.title == Self.centerlineTitle {
+                renderer.strokeColor = NSColor.systemGreen.withAlphaComponent(0.9)
+                renderer.lineWidth = 2
+                renderer.lineDashPattern = [2, 4]
+                return renderer
+            }
             if line.title == Self.routeTitle {
                 renderer.strokeColor = NSColor.white.withAlphaComponent(0.85)
                 renderer.lineWidth = 1.5

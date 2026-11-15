@@ -9,6 +9,8 @@ struct OwnFlight: Sendable, Equatable {
     var destination: String
     var destinationPosition: LatLon
     var tail: String?
+    /// Airline ICAO code and number (AFR162), often but not always the ADS-B callsign.
+    var callsign: String?
     var aircraftType: String?
     /// Best known departure and arrival times (actual, else estimated, else scheduled).
     var departure: Double
@@ -28,7 +30,7 @@ enum Flighty {
         .appendingPathComponent("Library/Containers/com.flightyapp.flighty/Data/Documents/MainFlightyDatabase.db")
 
     private static let query = """
-        SELECT coalesce(l.iata, l.icao, '') || f.number,
+        SELECT coalesce(l.iata, l.icao, '') || f.number, l.icao,
                coalesce(a.icao, a.iata, ''), coalesce(b.icao, b.iata, ''), b.latitude, b.longitude,
                f.equipmentTailNumber, f.equipmentIcao,
                coalesce(f.departureScheduleRunwayActual, f.departureScheduleGateActual,
@@ -71,17 +73,18 @@ enum Flighty {
         }
         var flights: [OwnFlight] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            let departure = sqlite3_column_double(statement, 7)
-            let arrival = sqlite3_column_double(statement, 8)
+            let departure = sqlite3_column_double(statement, 8)
+            let arrival = sqlite3_column_double(statement, 9)
             guard departure > 0, arrival > departure else { continue }
             flights.append(OwnFlight(
                 number: text(0) ?? "",
-                origin: text(1) ?? "",
-                destination: text(2) ?? "",
-                destinationPosition: LatLon(latitude: sqlite3_column_double(statement, 3),
-                                            longitude: sqlite3_column_double(statement, 4)),
-                tail: text(5),
-                aircraftType: text(6),
+                origin: text(2) ?? "",
+                destination: text(3) ?? "",
+                destinationPosition: LatLon(latitude: sqlite3_column_double(statement, 4),
+                                            longitude: sqlite3_column_double(statement, 5)),
+                tail: text(6),
+                callsign: text(1).flatMap { icao in text(0).map { icao + $0.drop { !$0.isNumber } } },
+                aircraftType: text(7),
                 departure: departure,
                 arrival: arrival
             ))

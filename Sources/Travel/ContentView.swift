@@ -469,6 +469,8 @@ private struct MapPane: View {
             highlighted: state.highlighted,
             mineID: state.mineID,
             route: state.mineRoute,
+            mineNote: state.mineNote,
+            centerline: state.mineAlignment?.ongoing == true ? state.mineCenterline : [],
             style: style,
             focus: focus,
             zoomRequest: zoomRequest,

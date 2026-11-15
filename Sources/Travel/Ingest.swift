@@ -111,6 +111,11 @@ final class Builder {
         if let callsign, !callsign.contains("#") { series[i].name = callsign }
         if let squawk = text(message, "squawk") { series[i].info.squawk = squawk }
         if message["df"] as? String == "18" { series[i].info.isVehicle = true }
+        // The strongest reception of this message, among receivers.
+        if let metadata = message["metadata"] as? NSArray {
+            let levels = metadata.compactMap { (($0 as? NSDictionary)?["rssi"] as? NSNumber)?.doubleValue }
+            if let level = levels.max() { series[i].info.rssi = level }
+        }
         // An all-call reply names the interrogator that asked for it.
         if message["df"] as? String == "11",
            let code = Self.interrogator(message["interrogator"]) ?? (message["frame"] as? String).flatMap(Self.allCallCode) {

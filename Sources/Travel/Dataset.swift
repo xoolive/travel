@@ -113,6 +113,34 @@ final class Dataset {
         return Self.interpolate(p, positions[after], at: t)
     }
 
+    /// Positions of `id` between `start` and `end`, each with the altitude and
+    /// track known at that moment (track derived from the previous position
+    /// when none was reported within 10 s).
+    func recentPath(of id: String, from start: Double, to end: Double) -> [PathPoint] {
+        guard let i = index[id] else { return [] }
+        let item = series[i]
+        let positions = item.positions
+        let first = Self.upperBound(positions.count) { positions[$0].t < start }
+        func value(_ channel: Channel, at t: Double, within: Double) -> Double? {
+            let samples = item.channels[channel.rawValue]
+            let k = Self.upperBound(samples.count) { samples[$0].t <= t }
+            guard k > 0, t - samples[k - 1].t <= within else { return nil }
+            return samples[k - 1].v
+        }
+        var path: [PathPoint] = []
+        var previous: LatLon?
+        for p in positions[first...] where p.t <= end {
+            let here = LatLon(latitude: p.latitude, longitude: p.longitude)
+            var track = value(.track, at: p.t, within: 10)
+            if track == nil, let previous, Geo.distance(previous, here) > 50 {
+                track = Geo.bearing(previous, here)
+            }
+            path.append(PathPoint(t: p.t, position: here, altitude: value(.altitude, at: p.t, within: 30), track: track))
+            previous = here
+        }
+        return path
+    }
+
     func kind(of id: String) -> Kind? {
         index[id].map { series[$0].kind }
     }
