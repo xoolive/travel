@@ -15,7 +15,7 @@ final class Dataset {
     static let curveStep = 3.0
     /// The same for plots, as a fraction of the range of values.
     static let plotTolerance = 0.003
-    static let maxPlotPoints = 3000
+    static let maxPlotPoints = 1000
     /// Longer position gaps are drawn dashed.
     static let dashedGap = 300.0
     /// A target is kept on the map across position gaps up to this long.
@@ -39,8 +39,8 @@ final class Dataset {
     private(set) var stations: [StationReport] = []
     private var index: [String: Int] = [:]
     private var interrogatorCache: (revision: Int, at: Date, logs: [String: InterrogationLog], interrogators: [String: Interrogator])?
-    private var trackCache: (id: String, revision: Int, runs: [[Position]])?
-    private var turbulenceCache: (id: String, revision: Int, minutes: [TurbulenceMinute])?
+    private var trackCache: TrackCache?
+    private var turbulenceCache: (id: String, revision: Int, at: Date, minutes: [TurbulenceMinute])?
     private var plotCache: (revision: Int, entries: [String: [(sample: Sample, run: Int)]]) = (0, [:])
     private var south = 90.0, north = -90.0, west = 180.0, east = -180.0
 
@@ -163,9 +163,39 @@ final class Dataset {
         }
     }
 
-    /// Appends new data; within a series it must be newer than what is stored.
+    /// Reads a recording into a dataset that may already hold live data:
+    /// everything is put back in time order and messages present in both
+    /// (same time, same content) are kept once.
+    func backfill(_ batch: [Series]) {
+        merge(batch)
+        for i in series.indices {
+            series[i].sortIfNeeded()
+            series[i].removeDuplicates()
+        }
+        stations.sort { $0.t < $1.t }
+        var unique: [StationReport] = []
+        for report in stations where unique.last != report { unique.append(report) }
+        stations = unique
+        trackCache = nil
+        turbulenceCache = nil
+        revision += 1
+    }
+
+    /// ACARS heard on VHF carries the registration only: the series comes
+    /// under `#reg:REGISTRATION` and joins the aircraft's own here.
+    private func resolved(_ item: Series) -> Series {
+        guard item.id.hasPrefix(Series.registrationPrefix) else { return item }
+        let registration = String(item.id.dropFirst(Series.registrationPrefix.count))
+        let id = database?.address(ofRegistration: registration) ?? registration.lowercased()
+        var copy = Series(id: id, kind: .aircraft)
+        copy.append(item)
+        return copy
+    }
+
+    /// Appends new data, newer than what is stored or put back in order.
     func merge(_ batch: [Series]) {
-        for item in batch {
+        for original in batch {
+            let item = resolved(original)
             if item.id == Series.groundStations {
                 stations.append(contentsOf: item.stations)
                 if !zip(stations, stations.dropFirst()).allSatisfy({ $0.t <= $1.t }) { stations.sort { $0.t < $1.t } }
@@ -393,7 +423,11 @@ final class Dataset {
     /// Minute-by-minute turbulence measure of an aircraft; cached for the
     /// target last asked for.
     func turbulence(for id: String) -> [TurbulenceMinute] {
-        if let cache = turbulenceCache, cache.id == id, cache.revision == revision { return cache.minutes }
+        // Live, the whole flight is analysed again at most every 10 s.
+        if let cache = turbulenceCache, cache.id == id,
+           cache.revision == revision || (isLive && Date().timeIntervalSince(cache.at) < 10) {
+            return cache.minutes
+        }
         guard let i = index[id], series[i].kind == .aircraft else { return [] }
         let channels = series[i].channels
         let minutes = Turbulence.analyse(
@@ -403,23 +437,75 @@ final class Dataset {
             track: channels[Channel.track.rawValue],
             altitude: channels[Channel.altitude.rawValue]
         )
-        turbulenceCache = (id, revision, minutes)
+        turbulenceCache = (id, revision, Date(), minutes)
         return minutes
     }
 
+    /// Positions thinned per block of this many: a completed block is never
+    /// thinned again, so a growing live track costs only its last block.
+    static let trackBlock = 2000
+
+    /// What is known of the thinned track of the target last asked for.
+    private struct TrackCache {
+        let id: String
+        var revision: Int
+        /// Positions seen, and the first and last of them, to tell whether
+        /// the track only grew since.
+        var count = 0
+        var first = 0.0
+        var last = 0.0
+        /// Completed runs, thinned.
+        var closed: [[Position]] = []
+        /// The thinned completed blocks of the run going on.
+        var open: [Position] = []
+        /// Index of the first position of the block not completed yet.
+        var cursor = 0
+        var runs: [[Position]] = []
+    }
+
     /// The whole track of a target, split at long gaps and prepared for
-    /// drawing; cached for the target last asked for.
+    /// drawing; cached for the target last asked for, and extended rather
+    /// than recomputed while it grows.
     private func simplifiedRuns(_ id: String, _ positions: [Position]) -> [[Position]] {
         if let cache = trackCache, cache.id == id, cache.revision == revision { return cache.runs }
-        var runs: [[Position]] = []
-        var start = 0
-        for j in 1...positions.count {
-            guard j == positions.count || positions[j].t - positions[j - 1].t > Self.dashedGap else { continue }
-            runs.append(Self.prepare(positions, start..<j))
-            start = j
+        let n = positions.count
+        var cache = TrackCache(id: id, revision: revision)
+        if let old = trackCache, old.id == id, old.count > 0, n >= old.count,
+           positions[0].t == old.first, positions[old.count - 1].t == old.last {
+            cache = old
+            cache.revision = revision
         }
-        trackCache = (id, revision, runs)
-        return runs
+        // Appends a thinned block to the run going on; consecutive blocks
+        // share their boundary point.
+        func add(_ block: [Position]) {
+            cache.open.append(contentsOf: cache.open.isEmpty ? block[...] : block.dropFirst())
+        }
+        var start = cache.cursor
+        var i = start + 1
+        while i < n {
+            if positions[i].t - positions[i - 1].t > Self.dashedGap {
+                add(Self.prepare(positions, start..<i))
+                cache.closed.append(cache.open)
+                cache.open = []
+                start = i
+            } else if i - start >= Self.trackBlock {
+                add(Self.prepare(positions, start..<(i + 1)))
+                start = i
+            }
+            i += 1
+        }
+        cache.cursor = start
+        var current = cache.open
+        if n > start {
+            let tail = Self.prepare(positions, start..<n)
+            current.append(contentsOf: current.isEmpty ? tail[...] : tail.dropFirst())
+        }
+        cache.runs = current.isEmpty ? cache.closed : cache.closed + [current]
+        cache.count = n
+        cache.first = positions.first?.t ?? 0
+        cache.last = positions.last?.t ?? 0
+        trackCache = cache
+        return cache.runs
     }
 
     /// Thins one run where the path is straight, keeps nearly everything at

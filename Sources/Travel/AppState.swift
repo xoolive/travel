@@ -65,6 +65,14 @@ final class AppState {
     private(set) var dataset: Dataset?
     /// Mirrors `dataset.revision` so views refresh when data arrives.
     private(set) var revision = 0
+    /// What the plots follow: `revision` and `rangeEnd`, at most every few
+    /// seconds live (redrawing every chart at each batch saturates the main thread).
+    private(set) var plotRevision = 0
+    private(set) var plotRangeEnd = 0.0
+    @ObservationIgnored private var plotsUpdated = Date.distantPast
+    private static let plotInterval = 5.0
+    /// Recordings being read into the live view, 0...1.
+    private(set) var backfillProgress: Double?
     private(set) var entities: [Entity] = []
     private(set) var selectedTrack: [TrackSegment] = []
     /// Datalink and TCAS events of the selected aircraft, up to now.
@@ -412,6 +420,37 @@ final class AppState {
         persistLiveSources()
     }
 
+    /// Reads recordings into the live view, so that it starts with their
+    /// history (jet1090, uplink1030, datalink output); live data keeps
+    /// arriving meanwhile. Messages both recorded and received live appear once.
+    func backfill(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        backfillProgress = 0
+        Task {
+            let worker = Task.detached(priority: .userInitiated) {
+                try RecordingLoader.load(urls) { fraction in
+                    Task { @MainActor in
+                        if self.backfillProgress != nil { self.backfillProgress = fraction }
+                    }
+                }
+            }
+            do {
+                let series = try await worker.value
+                let live = liveDataset
+                live.backfill(series)
+                if dataset === live {
+                    revision = live.revision
+                    if live.start.isFinite { rangeStart = live.start }
+                    syncPlots(force: true)
+                    refresh()
+                }
+            } catch {
+                loadError = error.localizedDescription
+            }
+            backfillProgress = nil
+        }
+    }
+
     /// Forgets everything received live so far; sources keep running.
     func clearLive() {
         let wasDisplayed = isLive
@@ -440,6 +479,7 @@ final class AppState {
             liveDataset.use(database)
             if let dataset, dataset !== liveDataset { dataset.use(database) }
             revision = dataset?.revision ?? 0
+            syncPlots(force: true)
             refresh()
         }
     }
@@ -505,6 +545,7 @@ final class AppState {
             currentTime = dataset.start
             isPlaying = true
         }
+        syncPlots(force: true)
         refresh()
         startTicker()
     }
@@ -580,8 +621,19 @@ final class AppState {
         }
     }
 
+    /// Lets the plots catch up with the data: at once for a recording, at
+    /// most every `plotInterval` seconds live.
+    private func syncPlots(force: Bool = false) {
+        guard force || !isLive || Date().timeIntervalSince(plotsUpdated) >= Self.plotInterval else { return }
+        guard force || plotRevision != revision || plotRangeEnd != rangeEnd else { return }
+        plotsUpdated = Date()
+        if plotRevision != revision { plotRevision = revision }
+        if plotRangeEnd != rangeEnd { plotRangeEnd = rangeEnd }
+    }
+
     private func tick(_ elapsed: Double) {
         guard dataset != nil else { return }
+        defer { syncPlots() }
         if isLive {
             let now = Date().timeIntervalSince1970
             rangeEnd = now

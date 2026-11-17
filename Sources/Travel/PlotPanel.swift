@@ -47,8 +47,8 @@ struct PlotStack: View {
     let kind: Kind
 
     var body: some View {
-        // Reading `revision` redraws the plots when live data arrives.
-        let _ = state.revision
+        // Reading `plotRevision` redraws the plots when live data arrives (throttled live).
+        let _ = state.plotRevision
         VStack(alignment: .leading, spacing: 18) {
             if kind == .aircraft, let dataset = state.dataset {
                 let minutes = dataset.turbulence(for: id)
@@ -99,11 +99,11 @@ struct PlotStack: View {
         }
         .chartForegroundStyleScale(domain: content.lines.map(\.id), range: content.lines.map(\.color))
         .chartYScale(domain: content.domain)
-        .chartXScale(domain: Date(timeIntervalSince1970: state.rangeStart)...Date(timeIntervalSince1970: max(state.rangeEnd, state.rangeStart + 1)))
+        .chartXScale(domain: Date(timeIntervalSince1970: state.rangeStart)...Date(timeIntervalSince1970: max(state.plotRangeEnd, state.rangeStart + 1)))
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                 AxisGridLine()
-                AxisValueLabel(format: state.rangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
+                AxisValueLabel(format: state.plotRangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
             }
         }
         .chartYAxis {
@@ -240,11 +240,11 @@ private struct TurbulenceChart: View {
             }
             .chartForegroundStyleScale(domain: levels.map(\.rawValue), range: levels.map(\.color))
             .chartYScale(domain: 0...max(Turbulence.threshold * 1.25, (minutes.map(\.spread).max() ?? 0) * 1.1))
-            .chartXScale(domain: Date(timeIntervalSince1970: state.rangeStart)...Date(timeIntervalSince1970: max(state.rangeEnd, state.rangeStart + 1)))
+            .chartXScale(domain: Date(timeIntervalSince1970: state.rangeStart)...Date(timeIntervalSince1970: max(state.plotRangeEnd, state.rangeStart + 1)))
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                     AxisGridLine()
-                    AxisValueLabel(format: state.rangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
+                    AxisValueLabel(format: state.plotRangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
                 }
             }
             .chartYAxis {
@@ -300,7 +300,7 @@ private struct InterrogationChart: View {
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 4)) { _ in
                     AxisGridLine()
-                    AxisValueLabel(format: state.rangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
+                    AxisValueLabel(format: state.plotRangeEnd - state.rangeStart < 900 ? axisTime.second(.twoDigits) : axisTime)
                 }
             }
             .chartYAxis {
@@ -321,7 +321,7 @@ private struct InterrogationChart: View {
     }
 
     private var span: ClosedRange<Date> {
-        let first = uplinks.first?.t ?? state.rangeStart, last = uplinks.last?.t ?? state.rangeEnd
+        let first = uplinks.first?.t ?? state.rangeStart, last = uplinks.last?.t ?? state.plotRangeEnd
         let margin = max(10, (last - first) * 0.03)
         return Date(timeIntervalSince1970: first - margin)...Date(timeIntervalSince1970: last + margin)
     }

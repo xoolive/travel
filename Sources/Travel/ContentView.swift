@@ -283,12 +283,18 @@ struct ContentView: View {
 
     /// Command-line options, mostly for testing:
     /// recordings, --live, --source redis://host:6379/a,b, --table,
-    /// --zoom, --select <icao24 or mmsi>, --speed <factor>.
+    /// --zoom, --select <icao24 or mmsi>, --speed <factor>,
+    /// --backfill <recording> (repeatable: read into the live view, so that it
+    /// starts with the history recorded so far).
     private func applyLaunchOptions() async {
         let options = CommandLine.arguments
+        let backfill = options.indices.dropLast()
+            .filter { options[$0] == "--backfill" }
+            .map { URL(fileURLWithPath: (options[$0 + 1] as NSString).expandingTildeInPath) }
         let urls = options.dropFirst()
             .map { URL(fileURLWithPath: $0) }
-            .filter(RecordingLoader.isSupported)
+            .filter { RecordingLoader.isSupported($0) || FlightPlan.isPlan($0) }
+            .filter { url in !backfill.contains { $0.path == url.path } }
         if !urls.isEmpty, !Self.launchOptionsApplied { state.add(urls) }
         // A reopened window must not replay the launch options.
         guard !Self.launchOptionsApplied else { return }
@@ -301,6 +307,7 @@ struct ContentView: View {
                 state.start(source)
             }
         }
+        if !backfill.isEmpty { state.backfill(backfill) }
         if options.contains("--table") { showTable = true }
         if options.contains("--zoom") {
             while state.dataset == nil { try? await Task.sleep(for: .milliseconds(200)) }
@@ -320,7 +327,9 @@ struct ContentView: View {
                 let started = Date()
                 let points = await Task.detached { plan.waypoints() }.value
                 print("\(plan.callsign) \(plan.departure)-\(plan.destination): \(points.count) points in \(Int(Date().timeIntervalSince(started))) s")
-                print(points.map(\.name).joined(separator: " "))
+                for point in points {
+                    print(String(format: "%@\t%.5f\t%.5f%@", point.name, point.position.latitude, point.position.longitude, point.isFallback ? "\tx-plane" : ""))
+                }
             } else {
                 print("no flight plan in \(url.path)")
             }

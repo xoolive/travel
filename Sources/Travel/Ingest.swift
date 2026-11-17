@@ -213,7 +213,10 @@ final class Builder {
         }
         let body = message["message"] as? NSDictionary
         guard let avlc = message["avlc"] as? NSDictionary ?? body.flatMap({ Self.layer($0, "avlc") })
-        else { return }
+        else {
+            if let acars = message["acars"] as? NSDictionary { vhfAcars(message, acars, t: t) }
+            return
+        }
         let source = avlc["src"] as? NSDictionary
         let destination = avlc["dst"] as? NSDictionary
         let fromAircraft = (message["direction"] as? String).map { $0 == "downlink" }
@@ -292,6 +295,32 @@ final class Builder {
         ))
         let reported = arinc.map { adsc($0, into: i, t: t) } ?? false
         kinematics(message, into: i, t: t, position: !reported)
+    }
+
+    /// Classic VHF ACARS (`datalink vhf`): no VDL2 envelope, and the aircraft
+    /// named by its registration only, unless an address comes along.
+    private func vhfAcars(_ message: NSDictionary, _ acars: NSDictionary, t: Double) {
+        let registration = (message["registration"] ?? acars["registration"] ?? acars["reg"]) as? String
+        let id: String
+        if let address = message["icao24"] as? String {
+            id = address
+        } else if let registration {
+            let cleaned = registration.trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+            guard !cleaned.isEmpty else { return }
+            id = Series.registrationPrefix + cleaned.uppercased()
+        } else {
+            return
+        }
+        let hertz = ((message["metadata"] as? NSArray)?.firstObject as? NSDictionary)?["channel_hz"] as? NSNumber
+        let fromAircraft = (message["direction"] as? String).map { $0 == "downlink" } ?? true
+        let label = acars["label"] as? String ?? ""
+        let i = slot(id, .aircraft)
+        series[i].datalink.append(DatalinkMessage(
+            t: t, channel: hertz.map { $0.doubleValue / 1e6 }, station: nil, stationName: nil, stationPosition: nil,
+            fromAircraft: fromAircraft,
+            summary: "ACARS \(label)".trimmingCharacters(in: .whitespaces),
+            text: (acars["msg_text"] ?? acars["text"] ?? acars["message"]) as? String
+        ))
     }
 
     private func groundStation(_ report: StationReport) {

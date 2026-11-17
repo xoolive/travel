@@ -442,7 +442,26 @@ struct GlobeView: NSViewRepresentable {
             }
         }
 
-        func syncTrack(_ track: [TrackSegment], on map: MKMapView) {
+        /// Points per polyline. A live track grows at its end: cut into
+        /// fixed chunks, only the last one is replaced at each update, and
+        /// MapKit has time to draw the others.
+        private static let chunkSize = 200
+
+        func syncTrack(_ segments: [TrackSegment], on map: MKMapView) {
+            var track: [TrackSegment] = []
+            for segment in segments {
+                guard !segment.isGap, segment.mark == nil, segment.points.count > Self.chunkSize else {
+                    track.append(segment)
+                    continue
+                }
+                var start = 0
+                while start < segment.points.count - 1 {
+                    let end = min(start + Self.chunkSize, segment.points.count - 1)
+                    // Chunks share their boundary point, so the line is unbroken.
+                    track.append(TrackSegment(points: Array(segment.points[start...end]), isGap: false))
+                    start = end
+                }
+            }
             for (i, segment) in track.enumerated() {
                 let signature: [Double] = [
                     Double(segment.points.count),
@@ -892,9 +911,10 @@ struct GlobeView: NSViewRepresentable {
             place(card, over: hovered, on: map)
         }
 
-        /// Places a card to the right of an aircraft, past its wing tip,
-        /// vertically centred on it: the icon's frame is rotated with the
-        /// track, so its drawn half-width is taken from the rotated image.
+        /// Places a card off the aircraft's right wing tip, as the icon is
+        /// drawn on screen: the card sits beyond the tip along the wing, its
+        /// nearest edge 6 points away. Without a direction (a dot), it goes
+        /// to the right of the icon.
         private func place(_ card: HoverCard, over annotation: TargetAnnotation, on map: MKMapView, note: String? = nil) {
             guard let view = map.view(for: annotation) else {
                 card.isHidden = true
@@ -904,11 +924,65 @@ struct GlobeView: NSViewRepresentable {
             card.show(annotation.summary, note: note)
             let size = card.fittingSize
             let center = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: map)
-            let half = Self.halfWidth(of: view)
-            let x = center.x + half + 6
-            let y = center.y - size.height / 2
+            guard let nose = Self.screenAngle(forKey: annotation.iconKey) else {
+                let x = center.x + Self.halfWidth(of: view) + 6
+                let y = center.y - size.height / 2
+                card.frame = NSRect(x: x.rounded(), y: y.rounded(), width: size.width, height: size.height)
+                return
+            }
+            // Right wing: a quarter turn clockwise from the nose (y up).
+            let wing = nose - .pi / 2
+            let ux = cos(wing), uyUp = sin(wing)
+            let tip = Self.extent(of: view, along: wing)
+            // Distance from the card's centre to its edge facing the aircraft.
+            let reach = size.width / 2 * abs(ux) + size.height / 2 * abs(uyUp)
+            let d = tip + 6 + reach
+            let uy = map.isFlipped ? -uyUp : uyUp
+            let x = center.x + d * ux - size.width / 2
+            let y = center.y + d * uy - size.height / 2
             card.frame = NSRect(x: x.rounded(), y: y.rounded(), width: size.width, height: size.height)
         }
+
+        /// The on-screen nose direction an icon was drawn with, in radians
+        /// counter-clockwise from east, y up; nil for a dot.
+        private static func screenAngle(forKey key: Int) -> Double? {
+            guard key >= 0 else { return nil }
+            let style = key / sizes.count / AircraftIcons.capacity
+            let bucket = style / 8
+            guard bucket < buckets - 1 else { return nil }
+            return Double(bucket) * step * .pi / 180
+        }
+
+        /// How far the drawn shape reaches from the icon's centre along a
+        /// direction (radians, y up): the wing tip for the right-wing direction.
+        private static func extent(of view: MKAnnotationView, along angle: Double) -> CGFloat {
+            guard let image = view.image else { return view.bounds.width / 2 }
+            let key = ObjectIdentifier(image)
+            if let cached = wingExtents[key] { return cached }
+            var extent = image.size.width / 2
+            if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+               let data = cg.dataProvider?.data, let bytes = CFDataGetBytePtr(data),
+               cg.bitsPerPixel == 32, cg.width > 0 {
+                let alphaOffset: Int = switch cg.alphaInfo {
+                case .premultipliedFirst, .first, .noneSkipFirst: 0
+                default: 3
+                }
+                let ux = cos(angle), uy = sin(angle)
+                let midX = Double(cg.width) / 2, midY = Double(cg.height) / 2
+                var best = 0.0
+                for row in 0..<cg.height {
+                    for column in 0..<cg.width where bytes[row * cg.bytesPerRow + column * 4 + alphaOffset] > 16 {
+                        // Rows run top to bottom; y up is the other way.
+                        let along = (Double(column) + 0.5 - midX) * ux + (midY - Double(row) - 0.5) * uy
+                        best = max(best, along)
+                    }
+                }
+                extent = CGFloat(best) * image.size.width / CGFloat(cg.width)
+            }
+            wingExtents[key] = extent
+            return extent
+        }
+        nonisolated(unsafe) private static var wingExtents: [ObjectIdentifier: CGFloat] = [:]
 
         /// Horizontal half-extent of what an annotation view draws: the
         /// non-transparent part of its image, else its bounds.

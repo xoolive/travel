@@ -4,3 +4,9 @@ build/
 *.xcodeproj
 .DS_Store
 Icon?
+
+# Data extracted from recordings, and outputs of the scripts
+scripts/**/own.jsonl
+scripts/**/current.json
+scripts/**/smoothed.json
+__pycache__/

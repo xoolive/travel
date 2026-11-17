@@ -51,6 +51,8 @@ struct FlightPlan: Sendable, Equatable, Identifiable {
 struct Waypoint: Sendable, Equatable {
     var name: String
     var position: LatLon
+    /// From X-Plane's airways (`XPlaneAirways`), not the AIRAC data.
+    var isFallback = false
 }
 
 extension FlightPlan {
@@ -95,13 +97,26 @@ extension FlightPlan {
                 pendingAirway = token
                 continue
             }
+            // Not in the AIRAC data: X-Plane's airways, when it has one.
+            if airac?.1[token] == nil, XPlaneAirways.has(token) {
+                pendingAirway = token
+                continue
+            }
             guard let airac, let ids = airac.1[token], let here else { continue }
             let target = ids.compactMap { id in airac.0.points[id].map { (id, $0) } }
                 .min { Geo.distance($0.1.position, here) < Geo.distance($1.1.position, here) }
             guard let target else { continue }
-            if let airway = pendingAirway, let from = result.last?.name,
-               let path = Self.along(airway, from: from, near: here, to: target.0, airac.0) {
-                for point in path { add(point.name, point.position) }
+            if let airway = pendingAirway, let from = result.last?.name {
+                if airac.0.airways[airway] != nil,
+                   let path = Self.along(airway, from: from, near: here, to: target.0, airac.0) {
+                    for point in path { add(point.name, point.position) }
+                } else if let last = result.last,
+                          let fixes = XPlaneAirways.between(airway, from: last, to: Waypoint(name: token, position: target.1.position)) {
+                    for fix in fixes {
+                        add(fix.name, fix.position)
+                        if result.last?.name == fix.name { result[result.count - 1].isFallback = true }
+                    }
+                }
             }
             pendingAirway = nil
             add(token, target.1.position)

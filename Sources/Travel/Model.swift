@@ -252,22 +252,67 @@ struct Series: Sendable {
     /// Ground station reports travel from the builders to the dataset in a
     /// series of their own, under this identifier.
     static let groundStations = "#ground-stations"
+    /// Messages naming an aircraft by registration only (VHF ACARS) travel
+    /// under this prefix; the dataset turns it into the ICAO address.
+    static let registrationPrefix = "#reg:"
 
     /// Received positions, or the reported ones for an aircraft only heard
     /// on datalink.
     var track: [Position] { positions.isEmpty ? reported : positions }
 
+    /// Appends newer data. Live sources do not always arrive in time order
+    /// (two decoders, a recording read in afterwards): an array that would
+    /// go back in time is sorted again, checked at the joint only.
     mutating func append(_ other: Series) {
-        uplinks.append(contentsOf: other.uplinks)
-        datalink.append(contentsOf: other.datalink)
-        replies.append(contentsOf: other.replies)
-        reported.append(contentsOf: other.reported)
-        stations.append(contentsOf: other.stations)
+        func join<T>(_ items: inout [T], _ more: [T], _ t: (T) -> Double) {
+            guard let first = more.first else { return }
+            let ordered = items.last.map { t($0) <= t(first) } ?? true
+            items.append(contentsOf: more)
+            if !ordered || !zip(more, more.dropFirst()).allSatisfy({ t($0) <= t($1) }) {
+                items.sort { t($0) < t($1) }
+            }
+        }
+        join(&uplinks, other.uplinks, \.t)
+        join(&datalink, other.datalink, \.t)
+        join(&replies, other.replies, \.t)
+        join(&reported, other.reported, \.t)
+        join(&stations, other.stations, \.t)
         name = other.name ?? name
         info.merge(other.info)
-        activity.append(contentsOf: other.activity)
-        positions.append(contentsOf: other.positions)
-        for i in channels.indices { channels[i].append(contentsOf: other.channels[i]) }
+        join(&activity, other.activity) { $0 }
+        join(&positions, other.positions, \.t)
+        for i in channels.indices { join(&channels[i], other.channels[i], \.t) }
+    }
+
+    /// Drops messages present twice, once from a recording and once received
+    /// live: same time and same content. Call after `sortIfNeeded`.
+    mutating func removeDuplicates() {
+        func dedupe<T>(_ items: inout [T], _ t: (T) -> Double, _ same: (T, T) -> Bool) {
+            guard items.count > 1 else { return }
+            var out: [T] = []
+            out.reserveCapacity(items.count)
+            for item in items {
+                var k = out.count - 1
+                var duplicate = false
+                while k >= 0, t(out[k]) == t(item) {
+                    if same(out[k], item) { duplicate = true; break }
+                    k -= 1
+                }
+                if !duplicate { out.append(item) }
+            }
+            if out.count != items.count { items = out }
+        }
+        func samePosition(_ a: Position, _ b: Position) -> Bool {
+            a.latitude == b.latitude && a.longitude == b.longitude && a.surface == b.surface
+        }
+        dedupe(&activity, { $0 }, ==)
+        dedupe(&positions, \.t, samePosition)
+        dedupe(&reported, \.t, samePosition)
+        dedupe(&uplinks, \.t, ==)
+        dedupe(&datalink, \.t, ==)
+        dedupe(&replies, \.t, ==)
+        dedupe(&stations, \.t, ==)
+        for i in channels.indices { dedupe(&channels[i], \.t, ==) }
     }
 
     /// Restores time order after merging files that overlap or arrive unordered.
