@@ -2,7 +2,7 @@
 
 Notes on how travel reads uplink (1030 MHz) and datalink (VDL2, VHF ACARS,
 HFDL, Airframes.io) messages, what the formats look like, and what we learned
-along the way. Code: `Sources/Travel/Ingest.swift` (parsing),
+along the way. Code: `Sources/Travel/Core/Input/Ingest.swift` (parsing),
 `Dataset.swift` (merging, timeouts), `PlotPanel.swift` (display).
 
 ## How messages attach to aircraft
