@@ -67,7 +67,7 @@ happened earlier in the flight.
     the overlay replaced before it is drawn, the line never shows. The older
     segments (before the 16:08 gap) keep their signature and stay drawn.
 - **No workaround in the interface.** The plots are part of the selection
-  card (`ContentView.swift`, `PlotStack` under the flight plan), and the
+  card (`Views/Detail/TargetDetail.swift`, `PlotStack` under the flight plan), and the
   track is drawn only for the selected aircraft. Deselecting removes both.
 
 Fixes, on top of those below:

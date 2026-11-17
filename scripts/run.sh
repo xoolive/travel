@@ -3,6 +3,11 @@
 set -e
 cd "$(dirname "$0")/.."
 CONFIG="${CONFIG:-release}"
+# Core/ is the model, inputs, reference data and analysis: no interface.
+if grep -rlE '^import (SwiftUI|AppKit|MapKit|Charts)' Sources/Travel/Core; then
+    echo "Core/ must not import SwiftUI, AppKit, MapKit or Charts (files above)" >&2
+    exit 1
+fi
 swift build -c "$CONFIG"
 APP="build/Travel.app"
 rm -rf "$APP"
