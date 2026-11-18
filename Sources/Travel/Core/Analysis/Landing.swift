@@ -17,61 +17,64 @@ struct Alignment: Sendable, Equatable {
     var threshold: Threshold
     var start: Double
     var end: Double
-    /// Long enough (one minute) to be trusted, as in the traffic library.
-    var confirmed: Bool
     /// Still aligned at the latest position.
     var ongoing: Bool
+    /// Farthest distance (NM) from the threshold in the aligned stretch.
+    var distance: Double
 }
 
-/// The aligned-on-ILS method of the traffic library
-/// (`traffic.algorithms.navigation.landing.LandingAlignedOnILS`), run on a
-/// recent trajectory so that it works on live data:
+/// The aligned-on-ILS method of the traffic library, reproduced as written
+/// (`traffic.algorithms.navigation.landing.LandingAlignedOnILS.apply`):
 ///
-/// - lateral offset from the extended centreline, distance to the threshold
-///   (NM) times the bearing difference (radians), below 0.1 NM;
-/// - heading towards the threshold: cos(bearing to threshold − track) > 0;
-/// - below the airport elevation plus 5,000 ft when the altitude is known;
-/// - in the air: surface positions (BDS 0,6) are left out, unlike in traffic,
-///   since a live trajectory goes on with the taxi;
-/// - aligned positions split at gaps over 20 s; a stretch counts once it
-///   lasts a minute, and is reported earlier as not yet confirmed.
+/// - for each threshold, keep the points where
+///   `distance × |radians(bearing − threshold.bearing)| < 0.1` (distance in
+///   NM, bearing from the point to the threshold in [0, 360), the
+///   difference not wrapped) and `cos(bearing − track) > 0`; a point without
+///   a track fails the second test, as NaN does in pandas;
+/// - split them where consecutive points are more than 20 s apart;
+/// - keep a chunk longer than one minute whose lowest known altitude is
+///   below the airport elevation plus 5,000 ft (a chunk without altitude
+///   is dropped);
+/// - the chunks of all thresholds, ordered by start; traffic's `final` (the
+///   landing) is the one that starts last.
 enum Landing {
-    static let tolerance = 0.1
-    static let ceiling = 5000.0
-    static let gap = 20.0
-    static let minimum = 60.0
+    static let angleTolerance = 0.1
+    static let minDuration = 60.0
+    static let maxFeetAboveAirport = 5000.0
+    static let split = 20.0
 
-    /// The latest alignment on any of the thresholds, if any.
-    static func latest(_ path: [PathPoint], thresholds: [Threshold]) -> Alignment? {
-        var best: Alignment?
+    /// Every aligned chunk, ordered by start.
+    static func chunks(_ path: [PathPoint], thresholds: [Threshold], airportElevation: Double) -> [Alignment] {
+        var result: [Alignment] = []
         for threshold in thresholds {
-            var start: Double?, end = 0.0
-            var last: Alignment?
+            var chunk: [(PathPoint, Double)] = []
+            func close() {
+                defer { chunk = [] }
+                guard let first = chunk.first, let last = chunk.last, last.0.t - first.0.t > minDuration,
+                      let lowest = chunk.compactMap(\.0.altitude).min(),
+                      lowest < airportElevation + maxFeetAboveAirport
+                else { return }
+                result.append(Alignment(threshold: threshold, start: first.0.t, end: last.0.t, ongoing: false,
+                                        distance: chunk.map(\.1).max() ?? 0))
+            }
             for p in path {
-                // Only in the air, as told by surface position messages (BDS
-                // 0,6), not by altitude: taxiing back along a runway after
-                // landing would otherwise read as its opposite end.
-                guard !p.onGround else { continue }
-                if let altitude = p.altitude, altitude >= threshold.elevation + ceiling { continue }
-                let toThreshold = Geo.bearing(p.position, threshold.position)
+                let bearing = Geo.bearing(p.position, threshold.position)
                 let nm = Geo.distance(p.position, threshold.position) / 1852
-                let difference = abs(((toThreshold - threshold.bearing + 540).truncatingRemainder(dividingBy: 360)) - 180)
-                let towards = p.track.map { cos((toThreshold - $0) * .pi / 180) > 0 } ?? true
-                guard nm * difference * .pi / 180 < tolerance, towards else { continue }
-                if let s = start, p.t - end <= gap {
-                    end = p.t
-                    last = Alignment(threshold: threshold, start: s, end: end, confirmed: end - s >= minimum, ongoing: false)
-                } else {
-                    start = p.t
-                    end = p.t
-                    last = Alignment(threshold: threshold, start: p.t, end: p.t, confirmed: false, ongoing: false)
-                }
+                let bDiff = nm * abs((bearing - threshold.bearing) * .pi / 180)
+                guard bDiff < angleTolerance, let track = p.track, cos((bearing - track) * .pi / 180) > 0 else { continue }
+                if let last = chunk.last, p.t - last.0.t > split { close() }
+                chunk.append((p, nm))
             }
-            if var candidate = last {
-                candidate.ongoing = (path.last?.t ?? 0) - candidate.end <= gap
-                if best.map({ candidate.end > $0.end }) ?? true { best = candidate }
-            }
+            close()
         }
-        return best
+        return result.sorted { $0.start < $1.start }
+    }
+
+    /// The chunk that starts last, marked ongoing when it reaches the end of
+    /// the path (within 20 s).
+    static func latest(_ path: [PathPoint], thresholds: [Threshold], airportElevation: Double) -> Alignment? {
+        guard var found = chunks(path, thresholds: thresholds, airportElevation: airportElevation).last else { return nil }
+        found.ongoing = (path.last?.t ?? 0) - found.end <= split
+        return found
     }
 }

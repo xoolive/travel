@@ -91,8 +91,75 @@ BATUS 43.13 95.09 · LIKMI 42.39 95.77 · GOVSA 41.87 96.24
     Navigraph and Jeppesen.
   - X-Plane's current `earth_awy.dat` (format XP-AWY1101) ships with the
     simulator; no standalone download was found.
-- **SIDs/STARs** (the RJTT arrival `XAC1A`) are still missing: that needs
-  another source.
+- **SIDs/STARs** outside EUROCONTROL: typed in from the AIP into
+  `~/Documents/data/travel/procedures.txt` (`Procedures.swift`, or
+  `TRAVEL_PROCEDURES`), each block with its source. It has the RJTT
+  OSHIMA arrivals XAC1A, XAC1K and XAC2C (AIP Japan AD2.24-STAR-11 to -14,
+  EFF 31 OCT 2024, from a public mirror; the official eAIP needs a login).
+  AF162 flew XAC1A as far as TT452, was cut short of WANDA, then flew the
+  XAC1K ending (UMUKI 0.1 NM, KAIHO 0.2 NM).
+
+## Navigation data: several sources, one interface
+
+Today the route resolver has three hand-wired paths:
+- the AIXM baseline (`Airac`);
+- X-Plane airways (`XPlaneAirways`);
+- a hand-typed procedures file (`Procedures`, the RJTT XAC STARs).
+
+Each new region would add another special case. Replace them with one layer.
+
+- **One model.** Points, navaids, airways (segments, with direction when
+  known), SIDs/STARs/approaches as ordered legs with their constraints
+  (altitude, speed, path terminator). Every item carries its source and
+  its validity (AIRAC cycle or effective date).
+- **Sources as adapters**, each turning its format into that model:
+  - EUROCONTROL AIXM baseline (as now);
+  - ARINC 424, which covers most of the rest with one parser: FAA CIFP
+    (public, US procedures), X-Plane's `CIFP/*.dat` and `earth_*.dat`
+    from a simulator install, a Navigraph or Jeppesen file the user
+    provides;
+  - national eAIPs: AIP Japan (AIS Japan, HTML after a free login) and
+    others in the EUROCONTROL eAIP format, with tables that can be parsed
+    (STAR legs, waypoint coordinates), cached per effective date;
+  - local corrections and additions (BOTKI on W270, inferred from a track)
+    in the same model, marked as such.
+- **Precedence by region and date**: the most recent official source
+  covering the area first, then the others; an older or unofficial source
+  only fills gaps. The resolver asks the layer, not each source.
+- **Provenance in the interface**: `Travel --plan` and the plan card say
+  which source gave each point and of which cycle. The map draws
+  non-official points differently.
+- Nothing redistributed: sources are read from where the user keeps them
+  (`~/Documents/data/…`, a simulator, traffic), indexed in
+  `~/Library/Caches/travel/`.
+
+## Runway thresholds: drop the RJTT correction once OurAirports has it
+
+`Resources/runways.csv` comes from OurAirports, read from traffic's cache
+(`~/Library/Caches/traffic/runways_ourairports.parquet`). At RJTT that copy
+was wrong:
+
+- 34R gave the displaced threshold, not the runway end (367 m off);
+- 34L, 05 and 16L were 29–43 m off;
+- 05's heading read 57°.
+
+The bearings of 16L/34R and 16R/34L were off by 1.0° and 0.5°, enough to
+delay runway alignment by a nautical mile (AF162 on 34L, 16 November 2026).
+
+- **For now:** `scripts/make-runways.py` replaces the RJTT ends with the AIP
+  values (`CORRECTIONS`, AIP Japan RJTT AD 2.12, EFF 28 NOV 2024), and the
+  CSV has them.
+- **Upstream:** the eight RJTT ends were corrected on OurAirports on
+  18 November 2026 and checked against the AIP:
+  - positions, headings and elevations;
+  - displaced thresholds 16L 1280 ft, 34R 1180 ft, 16R 1577 ft.
+- **Later, to do:**
+  - Refresh traffic's cache (or OurAirports' `runways.csv` export), and check
+    that its RJTT rows match the AIP.
+  - Then remove the RJTT entries from `CORRECTIONS`, regenerate, and check
+    that `git diff Resources/runways.csv` shows no RJTT change.
+- Other airports may have the same kind of error: compare with their AIP when
+  an alignment looks late or misses a runway.
 
 ## Decoders for local receivers
 

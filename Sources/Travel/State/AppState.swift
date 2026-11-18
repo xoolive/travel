@@ -108,7 +108,7 @@ final class AppState {
     private(set) var mineRoute: [LatLon] = []
     /// The runway the user's aircraft is aligned with, or was in the last 5 minutes.
     private(set) var mineAlignment: Alignment?
-    /// Confirmed runway alignments, by flight: the flight has landed after them.
+    /// Runway alignments (a minute or more), by flight: the flight has landed after them.
     @ObservationIgnored private var landed: [String: Alignment] = [:]
     @ObservationIgnored private var scanned: [String: Double] = [:]
     /// The third line of the user's aircraft card.
@@ -117,12 +117,12 @@ final class AppState {
         guard let a = mineAlignment else { return "\(flight.number) → \(flight.destination)" }
         let runway = a.threshold.name
         if a.ongoing {
-            return a.confirmed ? "\(flight.number) · aligned on \(a.threshold.airport) \(runway)" : "\(flight.number) · aligning on \(runway)"
+            return "\(flight.number) · aligned on \(a.threshold.airport) \(runway)"
         }
         let until = Date(timeIntervalSince1970: a.end).formatted(Date.FormatStyle(timeZone: .gmt).hour(.twoDigits(amPM: .omitted)).minute())
         return "\(flight.number) · was on \(a.threshold.airport) \(runway) until \(until)"
     }
-    /// Ten nautical miles of extended centreline before that threshold.
+    /// The extended centreline over the aligned stretch.
     private(set) var mineCenterline: [LatLon] = []
     /// The radar whose card is open, by site name.
     var selectedRadar: String? {
@@ -209,15 +209,16 @@ final class AppState {
     /// Runway alignment of the user's aircraft over the last 15 minutes, on
     /// the runways of its destination. Kept 5 minutes after it ends.
     ///
-    /// A confirmed alignment is remembered for the flight: after it, the
+    /// An alignment is remembered for the flight: after it, the
     /// aircraft has landed and no route is drawn any more, however long ago.
     /// Going back in time before it shows the flight as before.
     private func alignment(of id: String, flight: OwnFlight, at t: Double) -> Alignment? {
         guard let dataset, let thresholds = Runways.byAirport[flight.destination] else { return nil }
+        let elevation = Airports.elevation(of: flight.destination) ?? 0
         let key = "\(flight.number)@\(Int(flight.departure))"
         let path = dataset.recentPath(of: id, from: t - 900, to: t)
-        if let found = Landing.latest(path, thresholds: thresholds) {
-            if found.confirmed { landed[key] = found }
+        if let found = Landing.latest(path, thresholds: thresholds, airportElevation: elevation) {
+            landed[key] = found
             if found.ongoing || t - found.end < 300 { return found }
         }
         // Jumped past the landing in a replay: look back over the whole
@@ -225,7 +226,7 @@ final class AppState {
         if landed[key] == nil, t - 900 > flight.departure - 1800, abs(t - (scanned[key] ?? -.infinity)) > 60 {
             scanned[key] = t
             let whole = dataset.recentPath(of: id, from: flight.departure - 1800, to: t)
-            if let found = Landing.latest(whole, thresholds: thresholds), found.confirmed { landed[key] = found }
+            if let found = Landing.latest(whole, thresholds: thresholds, airportElevation: elevation) { landed[key] = found }
         }
         if var past = landed[key], t >= past.start {
             past.ongoing = false
@@ -268,8 +269,11 @@ final class AppState {
         let alignment = id.flatMap { id in flight.flatMap { alignment(of: id, flight: $0, at: t) } }
         if alignment != mineAlignment { mineAlignment = alignment }
         var centerline: [LatLon] = []
-        if let threshold = alignment.map(\.threshold) {
-            let outer = Geo.destination(threshold.position, bearing: threshold.bearing + 180, distance: 10 * 1852)
+        // Over the aligned stretch only (at least 1 NM), so that it lies
+        // under the trajectory.
+        if let alignment {
+            let threshold = alignment.threshold
+            let outer = Geo.destination(threshold.position, bearing: threshold.bearing + 180, distance: max(alignment.distance, 1) * 1852)
             centerline = [outer, threshold.position]
         }
         if centerline != mineCenterline { mineCenterline = centerline }
@@ -277,7 +281,7 @@ final class AppState {
         // the aligned segment shows the rest, and after landing nothing more.
         // Not drawn either when a filed plan (field 15) gives the real route.
         var route: [LatLon] = []
-        if let id, id == selectedID, let flight, alignment?.confirmed != true,
+        if let id, id == selectedID, let flight, alignment == nil,
            flightPlan(for: id, callsign: entities.first(where: { $0.id == id })?.name ?? flight.callsign) == nil,
            let entity = entities.first(where: { $0.id == id }),
            let latitude = entity.latitude, let longitude = entity.longitude {
