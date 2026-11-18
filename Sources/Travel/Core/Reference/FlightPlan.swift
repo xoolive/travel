@@ -51,8 +51,16 @@ struct FlightPlan: Sendable, Equatable, Identifiable {
 struct Waypoint: Sendable, Equatable {
     var name: String
     var position: LatLon
-    /// From X-Plane's airways (`XPlaneAirways`), not the AIRAC data.
-    var isFallback = false
+    var source: Source = .airac
+
+    enum Source: String, Sendable {
+        /// The EUROCONTROL AIXM baseline, or coordinates in the plan.
+        case airac
+        /// X-Plane's airways (`XPlaneAirways`): older data.
+        case xplane
+        /// The local procedures file (`Procedures`), typed in from an AIP.
+        case local
+    }
 }
 
 extension FlightPlan {
@@ -64,9 +72,9 @@ extension FlightPlan {
     func waypoints() -> [Waypoint] {
         let airac = Airac.index()
         var result: [Waypoint] = []
-        func add(_ name: String, _ position: LatLon) {
+        func add(_ name: String, _ position: LatLon, _ source: Waypoint.Source = .airac) {
             if result.last.map({ $0.position != position }) ?? true {
-                result.append(Waypoint(name: name, position: position))
+                result.append(Waypoint(name: name, position: position, source: source))
             }
         }
         if let start = airport(departure, airac) { add(departure, start) }
@@ -85,8 +93,16 @@ extension FlightPlan {
                 for point in Self.walk(legs, airac.0, to: next) { add(point.name, point.position) }
                 continue
             }
+            if n == 0, let fixes = Procedures.departure(token, at: departure, to: elements.dropFirst().first) {
+                for fix in fixes { add(fix.name, fix.position, .local) }
+                continue
+            }
             if n == elements.count - 1, let airac, let legs = Self.procedure(token, at: destination, in: airac.0.arrivals) {
                 for point in Self.walk(legs, airac.0, from: result.last?.name) { add(point.name, point.position) }
+                continue
+            }
+            if n == elements.count - 1, let fixes = Procedures.arrival(token, at: destination, from: result.last?.name) {
+                for fix in fixes { add(fix.name, fix.position, .local) }
                 continue
             }
             if let position = Self.coordinates(token) {
@@ -112,10 +128,7 @@ extension FlightPlan {
                     for point in path { add(point.name, point.position) }
                 } else if let last = result.last,
                           let fixes = XPlaneAirways.between(airway, from: last, to: Waypoint(name: token, position: target.1.position)) {
-                    for fix in fixes {
-                        add(fix.name, fix.position)
-                        if result.last?.name == fix.name { result[result.count - 1].isFallback = true }
-                    }
+                    for fix in fixes { add(fix.name, fix.position, .xplane) }
                 }
             }
             pendingAirway = nil

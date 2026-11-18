@@ -64,7 +64,7 @@ extension ContentView {
                 let points = await Task.detached { plan.waypoints() }.value
                 print("\(plan.callsign) \(plan.departure)-\(plan.destination): \(points.count) points in \(Int(Date().timeIntervalSince(started))) s")
                 for point in points {
-                    print(String(format: "%@\t%.5f\t%.5f%@", point.name, point.position.latitude, point.position.longitude, point.isFallback ? "\tx-plane" : ""))
+                    print(String(format: "%@\t%.5f\t%.5f%@", point.name, point.position.latitude, point.position.longitude, point.source == .airac ? "" : "\t\(point.source.rawValue)"))
                 }
             } else {
                 print("no flight plan in \(url.path)")
